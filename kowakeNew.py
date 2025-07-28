@@ -1,4 +1,5 @@
 import os
+import sys
 import platform
 import shutil
 import subprocess
@@ -42,30 +43,31 @@ os.environ["FFPROBE_BINARY"] = ffprobe_path
 print(f"[INFO] Using ffmpeg:  {ffmpeg_path}")
 print(f"[INFO] Using ffprobe: {ffprobe_path}")
 
-# ── 2) 環境変数読み込み ──
+# ── 2) 環境変数読み込み ─────────────────────────────────────────
 load_dotenv()
-OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
-OPENAI_API_BASE  = os.getenv("OPENAI_API_BASE")
-DEPLOYMENT_ID    = os.getenv("DEPLOYMENT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
+DEPLOYMENT_ID = os.getenv("DEPLOYMENT_ID")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-TEMPERATURE      = float(os.getenv("TEMPERATURE", 0.7))
+TEMPERATURE = float(os.getenv("TEMPERATURE", 0.7))
 
-openai.api_key     = OPENAI_API_KEY
-openai.api_base    = OPENAI_API_BASE
-openai.api_type    = "azure"
+openai.api_key = OPENAI_API_KEY
+openai.api_base = OPENAI_API_BASE
+openai.api_type = "azure"
 openai.api_version = "2024-08-01-preview"
 
 deepgram_client = Deepgram(DEEPGRAM_API_KEY)
-
 TMP_DIR = tempfile.gettempdir()
 
+# ──────────────────────────────────────────────────────────────
+# 音声 → Deepgram → OpenAI 整形
+# ──────────────────────────────────────────────────────────────
 async def _transcribe_chunk(idx: int, chunk_path: str) -> str:
-    # WAV に変換してバッファ読み込み
     wav_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}_chunk_{idx}.wav")
-    subprocess.run([
-        ffmpeg_path, "-y", "-i", chunk_path,
-        "-ar", "16000", "-ac", "1", "-f", "wav", wav_path
-    ], check=True)
+    subprocess.run(
+        [ffmpeg_path, "-y", "-i", chunk_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
+        check=True,
+    )
     with open(wav_path, "rb") as f:
         buf = f.read()
     os.remove(wav_path)
@@ -73,11 +75,10 @@ async def _transcribe_chunk(idx: int, chunk_path: str) -> str:
 
     resp = await deepgram_client.transcription.prerecorded(
         {"buffer": buf, "mimetype": "audio/wav"},
-        {"model": "nova-2-general", "detect_language": True, "diarize": True, "utterances": True}
+        {"model": "nova-2-general", "detect_language": True, "diarize": True, "utterances": True},
     )
     return "\n".join(
-        f"[Speaker {u['speaker']}] {u['transcript']}"
-        for u in resp["results"]["utterances"]
+        f"[Speaker {u['speaker']}] {u['transcript']}" for u in resp["results"]["utterances"]
     )
 
 async def transcribe_and_correct(source: str) -> str:
@@ -94,65 +95,58 @@ async def transcribe_and_correct(source: str) -> str:
     else:
         local_audio = source
 
-    # 2) Fast‐Start 適用
+    # 2) Fast‑Start 適用
     ext = os.path.splitext(local_audio)[1]
     fixed = os.path.join(TMP_DIR, f"{uuid.uuid4()}_fixed{ext}")
-    subprocess.run([
-        ffmpeg_path, "-y", "-i", local_audio,
-        "-c", "copy", "-movflags", "+faststart", fixed
-    ], check=True)
+    subprocess.run(
+        [ffmpeg_path, "-y", "-i", local_audio, "-c", "copy", "-movflags", "+faststart", fixed],
+        check=True,
+    )
 
     # 3) 長さ取得 (秒)
     cmd = [
-        ffprobe_path, "-v", "error", "-select_streams", "a:0",
-        "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", fixed
+        ffprobe_path,
+        "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        fixed,
     ]
     duration = float(subprocess.check_output(cmd).strip())
-    chunk_len = 10 * 60        # 10分
-    overlap   = 1  * 60        # 1分
-    step      = chunk_len - overlap
+    chunk_len = 10 * 60  # 10分
+    overlap = 1 * 60  # 1分
+    step = chunk_len - overlap
 
-    # 4) ffmpeg でファイルをチャンクに分割
+    # 4) ffmpeg でチャンク分割
     chunk_paths = []
     start = 0.0
     idx = 0
     while start < duration:
         out_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}_seg_{idx}.mp4")
-        subprocess.run([
-            ffmpeg_path,
-            "-y",
-            "-ss", str(start),
-            "-t", str(min(chunk_len, duration - start)),
-            "-i", fixed,
-            "-c", "copy",
-            out_path
-        ], check=True)
+        subprocess.run(
+            [ffmpeg_path, "-y", "-ss", str(start), "-t", str(min(chunk_len, duration - start)), "-i", fixed, "-c", "copy", out_path],
+            check=True,
+        )
         chunk_paths.append((idx, out_path))
         idx += 1
         start += step
 
     # 5) 並列送信 → 整形AI
     corrected = []
-    batch = 6
-    for i in range(0, len(chunk_paths), batch):
-        tasks = [
-            _transcribe_chunk(idx, path)
-            for idx, path in chunk_paths[i : i + batch]
-        ]
+    for i in range(0, len(chunk_paths), 6):
+        tasks = [_transcribe_chunk(idx, path) for idx, path in chunk_paths[i : i + 6]]
         results = await asyncio.gather(*tasks)
         for text in results:
             prompt = (
                 "以下の音声書き起こしを自然な日本語にしてください。\n\n"
                 f"{text}\n\n"
-                "【出力形式】\n"
-                "[Speaker X] 発話内容\n"
-                "[Speaker X] 発話内容\n"
+                "【出力形式】\n[Speaker X] 発話内容\n[Speaker X] 発話内容\n"
             )
             resp = openai.ChatCompletion.create(
                 engine=DEPLOYMENT_ID,
                 messages=[
                     {"role": "system", "content": "あなたは日本語整形アシスタントです。"},
-                    {"role": "user",   "content": prompt},
+                    {"role": "user", "content": prompt},
                 ],
                 temperature=0,
                 max_tokens=4000,
@@ -161,45 +155,98 @@ async def transcribe_and_correct(source: str) -> str:
 
     full = "\n".join(corrected)
 
-    # 6) 後片付け
+    # クリーンアップ
     if source.lower().startswith("http"):
-        try: os.remove(local_audio)
-        except: pass
-    try: os.remove(fixed)
-    except: pass
+        os.remove(local_audio)
+    os.remove(fixed)
 
-    return _apply_keyword_replacements(full)
+    # 置換ステップ追加
+    replaced_text, hit = _apply_keyword_replacements(full)
+    return replaced_text
 
-# ─── 以下キーワード管理 / Blob 連携はそのまま ───────────────────
+# ─── キーワード管理 / Blob 連携 ────────────────────────────────
 _KEYWORDS_DB: list[dict] = []
 BLOB_JSON_PATH = "settings/keywords.json"
 
-def _apply_keyword_replacements(text: str) -> str:
+def _apply_keyword_replacements(text: str) -> tuple[str, int]:
+    """
+    テキストに対してキーワード置換を実行し、置換後テキストとヒット数を返します。
+    """
+    total_hit = 0
     for kw in _KEYWORDS_DB:
         corr = kw["keyword"]
-        tgts = [kw["reading"]] + [e.strip() for e in kw.get("wrong_examples","").split(",") if e.strip()]
+        tgts = [kw["reading"]] + [
+            e.strip() for e in re.split(r"[,\uFF0C\u3001]", kw.get("wrong_examples", "")) if e.strip()
+        ]
         for t in tgts:
-            text = re.sub(re.escape(t), corr, text)
-    return text
+            pat = re.compile(re.escape(t), flags=re.IGNORECASE)
+            text, n_hits = pat.subn(corr, text)
+            total_hit += n_hits
+    print(f"[DEBUG] keyword replace hit = {total_hit}", file=sys.stderr, flush=True)
+    return text, total_hit
 
-def get_all_keywords(): ...
-def get_keyword_by_id(id): ...
-def add_keyword(r, w, k): ...
-def delete_keyword_by_id(id): ...
-def update_keyword_by_id(id, r, w, k): ...
+# -------------------- CRUD + ログ ---------------------------------
+
+def get_all_keywords():
+    return _KEYWORDS_DB
+
+def get_keyword_by_id(id):
+    return next((k for k in _KEYWORDS_DB if k["id"] == id), None)
+
+def add_keyword(reading, wrong_examples, keyword):
+    before = len(_KEYWORDS_DB)
+    _KEYWORDS_DB.append({
+        "id": str(uuid.uuid4()),
+        "reading": reading,
+        "wrong_examples": wrong_examples,
+        "keyword": keyword,
+    })
+    after = len(_KEYWORDS_DB)
+    print(f"[ADD] keywords {before} → {after}")
+    _save_keywords_to_blob()
+
+def delete_keyword_by_id(id):
+    global _KEYWORDS_DB
+    before = len(_KEYWORDS_DB)
+    _KEYWORDS_DB = [k for k in _KEYWORDS_DB if k["id"] != id]
+    after = len(_KEYWORDS_DB)
+    print(f"[DEL] keywords {before} → {after}")
+    _save_keywords_to_blob()
+
+def update_keyword_by_id(id, reading, wrong_examples, keyword):
+    for k in _KEYWORDS_DB:
+        if k["id"] == id:
+            k["reading"] = reading
+            k["wrong_examples"] = wrong_examples
+            k["keyword"] = keyword
+            print(f"[UPDATE] keyword id={id} を更新しました")
+            break
+    _save_keywords_to_blob()
+
 
 def load_keywords_from_file():
     global _KEYWORDS_DB
     try:
         tmp = os.path.join(TMP_DIR, "keywords.json")
         Path(tmp).parent.mkdir(exist_ok=True, parents=True)
-        download_blob(BLOB_JSON_PATH, tmp)
-        with open(tmp, encoding="utf-8") as f:
+        try:
+            download_blob(BLOB_JSON_PATH, tmp)
+            print(f"[INFO] Blob からダウンロード完了 → {tmp}")
+        except Exception as e:
+            print(f"[INFO] Blob 取得ス킥: {e}")
+
+        local_json = os.path.abspath("keywords.json")
+        candidate = local_json if os.path.exists(local_json) else tmp
+
+        with open(candidate, encoding="utf-8") as f:
             _KEYWORDS_DB = json.load(f)
-        print(f"[INFO] キーワード {_KEYWORDS_DB and len(_KEYWORDS_DB)} 件ロード")
+
+        print(f"[INFO] キーワード {len(_KEYWORDS_DB)} 件ロード ({candidate})")
+        print("[DEBUG] SAMPLE:", _KEYWORDS_DB[:3])
     except Exception as e:
         print(f"[WARN] キーワード読込失敗: {e}")
         _KEYWORDS_DB = []
+
 
 def _save_keywords_to_blob():
     try:

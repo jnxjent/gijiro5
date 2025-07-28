@@ -19,7 +19,7 @@ def setup_routes(app):
     logger = logging.getLogger("routes")
     logging.basicConfig(level=logging.INFO)
     logger.info("✔ setup_routes() 開始")
-
+    load_keywords_from_file()   # ← これを追加するだけ
     # ─── トップページ ───────────────────────────
     @app.route("/", methods=["GET"])
     def index():
@@ -133,6 +133,7 @@ def setup_routes(app):
     @app.route("/keywords", methods=["GET"])
     def keywords_page():
         keywords = get_all_keywords()
+        print(f"🟡 /keywords loaded = {len(keywords)}")  # ★ログ①
         return render_template("keywords.html", keywords=keywords)
 
     @app.route("/register_keyword", methods=["POST"])
@@ -140,13 +141,27 @@ def setup_routes(app):
         reading = request.form.get("reading")
         wrong_examples = request.form.get("wrong_examples")
         keyword = request.form.get("keyword")
+
+        before = len(get_all_keywords())
+        print(f"🟢 register before = {before}")          # ★ログ②
+
         add_keyword(reading, wrong_examples, keyword)
+
+        after = len(get_all_keywords())
+        print(f"🟢 register after  = {after}")           # ★ログ③
         return redirect("/keywords")
 
     @app.route("/delete_keyword", methods=["POST"])
     def delete_keyword():
         keyword_id = request.form.get("id")
+
+        before = len(get_all_keywords())
+        print(f"🔴 delete  before = {before}")           # ★ログ④
+
         delete_keyword_by_id(keyword_id)
+
+        after = len(get_all_keywords())
+        print(f"🔴 delete  after  = {after}")            # ★ログ⑤
         return redirect("/keywords")
 
     @app.route("/edit_keyword", methods=["GET"])
@@ -161,5 +176,6 @@ def setup_routes(app):
         reading = request.form.get("reading")
         wrong_examples = request.form.get("wrong_examples")
         keyword_text = request.form.get("keyword")
+
         update_keyword_by_id(keyword_id, reading, wrong_examples, keyword_text)
         return redirect("/keywords")

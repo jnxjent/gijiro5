@@ -1,4 +1,6 @@
 import os
+import sys
+from kowake import load_keywords_from_file, _apply_keyword_replacements
 from pathlib import Path
 from table_writer import table_writer
 from minutes_writer import write_minutes_section
@@ -45,6 +47,13 @@ def process_document(word_file_path: str, output_file_path: str, extracted_info:
     print(f"[DEBUG] replaced_transcription length: {len(replaced_transcription)}")
     if not replaced_transcription:
         print("[WARNING] 本文文字列が空です。抽出キー名や前段の結合処理を確認してください。")
+
+    # ── キーワード置換の追加 ────────────────────────────────────
+    load_keywords_from_file()  # 最新定義をロード
+    replaced_transcription, hit = _apply_keyword_replacements(replaced_transcription)
+    # 標準エラーに出力してログストリームに残す
+    print(f"[DEBUG] keyword replace hit = {hit}", file=sys.stderr, flush=True)
+    # ─────────────────────────────────────────────────────────
 
     try:
         # ✅ 議事録本文の挿入

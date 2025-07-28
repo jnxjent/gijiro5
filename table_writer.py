@@ -3,107 +3,90 @@ import unicodedata
 import re
 import datetime
 
+# ── ヘルパ ───────────────────────────────────────────────
 def normalize_text(text: str) -> str:
-    """
-    テキストを正規化し、表記ゆれを統一する。
-    - NFKC 正規化 (全角・半角統一)
-    - 末尾の「:」「：」を削除
-    - 前後の空白を削除
-    """
     return unicodedata.normalize("NFKC", text).strip().rstrip("：:")
 
 def clean_repeated_labels(label: str, value: str) -> str:
-    """
-    `value` の冒頭に `label` が繰り返されている場合、それを削除する。
-    - 記号 `:`, `：`, `-`, `～`, `ー` も考慮
-    - "1. - 議題:" のような形式も削除
-    """
     label_norm = normalize_text(label)
-    # 文字列化＆NFKC正規化
     val = unicodedata.normalize("NFKC", str(value)).strip()
+    # (a) 「- label:」「label:」等
+    val = re.sub(rf"^[-\s]*{re.escape(label_norm)}[\s:：\-～ー]*", "", val).strip()
+    # (b) 「1. - label:」
+    return re.sub(rf"\d+\s*[\.．]\s*[-]?\s*{re.escape(label_norm)}\s*[:：]?", "", val).strip()
 
-    # ① "- label:" や "label:" の繰り返しを削除
-    pattern = rf"^[-\s]*{re.escape(label_norm)}[\s:：\-～ー]*"
-    cleaned = re.sub(pattern, "", val).strip()
-
-    # ② "数字. - ラベル:" の形式を削除
-    cleaned = re.sub(
-        rf"\d+\s*[\.．]\s*[-]?\s*{re.escape(label_norm)}\s*[:：]?", 
-        "", 
-        cleaned
-    ).strip()
-
-    return cleaned
-
+# ── メイン ───────────────────────────────────────────────
 def table_writer(word_file_path: str, output_file_path: str, extracted_info: dict):
-    """
-    WORDファイルの表から左列(0列)を抽出し、extracted_info のラベルと照合。
-    一致する場合、右列(1列)に値を転記し、合致しない場合は空白のままにする。
-    """
-
     doc = Document(word_file_path)
 
-    # ── (1) テンプレート側のラベルを正規化してマッピング ─────────────────
-    # 正規化ラベル → 元のセル文字列
+    # (1) テンプレ側ラベル → 正規化テーブル
     label_map = {}
-    for table in doc.tables:
-        for row in table.rows:
+    for tbl in doc.tables:
+        for row in tbl.rows:
             if len(row.cells) < 2:
                 continue
-            raw_label = row.cells[0].text.strip()
-            norm_label = normalize_text(raw_label)
-            label_map[norm_label] = raw_label
+            raw = row.cells[0].text.strip()
+            label_map[normalize_text(raw)] = raw
+    print("[LOG] 正規化ラベル:", label_map)
 
-    print("[LOG] 正規化ラベルマップ:", label_map)
+    # (2) 抽出結果キーの正規化
+    info_norm = {normalize_text(k): v for k, v in extracted_info.items()}
 
-    # ── (2) extracted_info のキーも正規化 ─────────────────────────────────
-    normalized_info = { normalize_text(k): v for k, v in extracted_info.items() }
-
-    # ── (3) 各セルを走査して転記 ─────────────────────────────────────────
-    for table in doc.tables:
-        for row in table.rows:
+    # (3) 転記ループ
+    for tbl in doc.tables:
+        for row in tbl.rows:
             if len(row.cells) < 2:
                 continue
 
             raw_label = row.cells[0].text.strip()
             norm_label = normalize_text(raw_label)
 
-            if norm_label in normalized_info:
-                raw_value = normalized_info[norm_label]
+            if norm_label in info_norm:
+                raw_value = info_norm[norm_label]
 
-                # ── (A) 「出席者」は改行せずカンマ区切りに
+                # ---- 出席者：カンマ区切り化＆数字除去 --------------------
                 if norm_label == normalize_text("出席者"):
                     parts = re.split(r"[、,;\n\r]+", str(raw_value))
-                    raw_value = ", ".join([p.strip() for p in parts if p.strip()])
+                    cleaned_parts = []
+                    for part in parts:
+                        p = part.strip()
+                        # 「1. 加藤」「１．加藤」「・1. 加藤」などを除去
+                        p = re.sub(r"^[・●■]?", "", p)               # 先頭の黒点
+                        p = re.sub(r"^\s*\d+\s*[\.．]\s*", "", p)       # 先頭番号
+                        if p:
+                            cleaned_parts.append(p)
+                    raw_value = ", ".join(cleaned_parts)
 
-                # ── (B) 「次回会議予定日時」は YYYY年MM月DD日 に整形
+                # ---- 次回日時：今年の西暦付与 ----------------------------
                 if norm_label == normalize_text("次回会議予定日時"):
                     txt = str(raw_value)
                     year = datetime.datetime.now().year
-                    def repl_date(m):
-                        m_str, d_str = m.group(1), m.group(2)
-                        return f"{year}年{int(m_str)}月{int(d_str)}日"
-                    raw_value = re.sub(r"(\d{1,2})月\s*(\d{1,2})日", repl_date, txt)
+                    raw_value = re.sub(
+                        r"(\d{1,2})月\s*(\d{1,2})日",
+                        lambda m: f"{year}年{int(m.group(1))}月{int(m.group(2))}日",
+                        txt
+                    )
 
-                # ── (C) 重複ラベル削除
+                # ---- ラベル重複除去 ------------------------------------
                 cleaned = clean_repeated_labels(raw_label, raw_value)
 
-                # ── (D) 行頭に「・」を追加（複数行対応）
-                lines = cleaned.splitlines()
-                bulleted = "\n".join(
-                    f"・{ln}" if ln and not ln.startswith("・") else ln
-                    for ln in lines
-                )
+                # ---- 黒点付与（番号付き行は除外） ------------------------
+                def add_bullet(line: str) -> str:
+                    if not line.strip():
+                        return line
+                    # 既に「・」「●」等が付いている、または「1.」「1．」等で始まる行なら何もしない
+                    if re.match(r"[・●■]", line) or re.match(r"\d+\s*[\.．]", line):
+                        return line
+                    return f"・{line}"
 
-                # 転記
+                bulleted = "\n".join(add_bullet(ln) for ln in cleaned.splitlines())
+
                 row.cells[1].text = bulleted
-                print(f"[LOG] {raw_label}: {bulleted} を転記")
-
+                print(f"[LOG]  {raw_label} → {bulleted}")
             else:
-                # データなしは空白
                 row.cells[1].text = ""
-                print(f"[WARN] {raw_label} に対応するデータなし（空白に設定）")
+                print(f"[WARN] {raw_label}: データなし")
 
-    # ── (4) ファイル保存 ────────────────────────────────────────────────
+    # (4) 保存
     doc.save(output_file_path)
-    print("テーブルデータが保存されました:", output_file_path)
+    print(f"[INFO] 保存完了 → {output_file_path}")
