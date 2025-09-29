@@ -1,0 +1,107 @@
+name: Deploy Gijiro3 TEST (Web & Function)
+
+on:
+  push:
+    branches: [ flex-test ]
+    paths:
+      - "web/**"
+      - "ProcessAudioFunction/**"
+      - ".github/workflows/deploy-test.yml"
+  workflow_dispatch: {}
+
+env:
+  AZURE_WEBAPP_NAME_TEST: gijiro-webapp-flex-test
+  AZURE_FUNCTIONAPP_NAME_TEST: gijiro-flex-plan
+
+jobs:
+  # ───────────────────────────────────────────────────────────
+  # 1) Deploy Web App (TEST)
+  # ───────────────────────────────────────────────────────────
+  webapp-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Run-From-Package が残っていると wwwroot を無視されるため明示的にOFF
+      - name: Ensure run-from-package is OFF
+        run: |
+          az webapp config appsettings delete -g ai2 -n "$AZURE_WEBAPP_NAME_TEST" \
+            --setting-names WEBSITE_RUN_FROM_PACKAGE WEBSITES_CONTENTAZUREFILECONNECTIONSTRING WEBSITES_CONTENTSHARE || true
+
+      # デプロイ対象を自動判定（web/ があればそこ、無ければリポジトリ直下）
+      - name: Resolve package path
+        run: |
+          if [ -d "web" ] && [ "$(ls -A web)" ]; then
+            echo "PKG_PATH=web" >> "$GITHUB_ENV"
+          else
+            echo "PKG_PATH=." >> "$GITHUB_ENV"
+          fi
+          echo "Using PKG_PATH=$PKG_PATH"
+
+      # 可視化 & 空チェック（最低限のファイルが無ければ失敗して原因を明示）
+      - name: Show package contents & ensure not empty
+        run: |
+          echo "=== Listing $PKG_PATH (top 2 levels) ==="
+          find "$PKG_PATH" -maxdepth 2 -type f | sed "s|^| - |" | head -n 200 || true
+          COUNT=$(find "$PKG_PATH" -type f ! -path "*/.git/*" | wc -l)
+          echo "FILE_COUNT=$COUNT"
+          if [ "$COUNT" -lt 2 ]; then
+            echo "::error::Package path '$PKG_PATH' has too few files. Check your repo structure."
+            exit 1
+          fi
+
+      # ZIP Deploy（Kuduが自動解凍。StorageのFW設定に非依存）
+      - name: Deploy to Azure Web App (TEST)
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME_TEST }}
+          package: ${{ env.PKG_PATH }}
+
+  # ───────────────────────────────────────────────────────────
+  # 2) Deploy Function App (TEST)
+  # ───────────────────────────────────────────────────────────
+  functionapp-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # 早めに存在確認（ID/ロケーションを表示）
+      - name: Verify Function App exists
+        run: |
+          az resource show \
+            -g ai2 \
+            -n "$AZURE_FUNCTIONAPP_NAME_TEST" \
+            --resource-type "Microsoft.Web/sites" \
+            --query "{id:id, rg:resourceGroup, location:location}" -o table
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 依存を .python_packages に展開して同梱（Linux Functions 推奨）
+      - name: Install function requirements into package
+        working-directory: ProcessAudioFunction
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
+
+      # Function デプロイ（ZIP Deploy）
+      - name: Deploy to Azure Function (TEST)
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME_TEST }}
+          package: ProcessAudioFunction
+# trigger Mon Sep 29 08:44:10 UTC 2025
