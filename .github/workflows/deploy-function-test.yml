@@ -10,7 +10,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_NAME: gijiro-flex-plan   # ← 新しい Flex Function
-  AZURE_RESOURCE_GROUP: ai2
+  AZURE_RESOURCE_GROUP: general51
 
 jobs:
   deploy-func:
