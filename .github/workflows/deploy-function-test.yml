@@ -2,43 +2,77 @@ name: Deploy Function (TEST Flex)
 
 on:
   push:
-    branches: [ flex-test ]                 # ← テスト専用
+    branches: [ flex-test ]                 # ← テスト専用ブランチ
     paths:
       - "ProcessAudioFunction/**"
       - ".github/workflows/deploy-function-test.yml"
-  workflow_dispatch:                         # ← 手動実行も可能に
+  workflow_dispatch:                        # ← 手動実行も可能
 
 env:
-  AZURE_FUNCTIONAPP_NAME: gijiro-flex-plan   # ← 新しい Flex Function
-  AZURE_RESOURCE_GROUP: general51
+  AZURE_SUBSCRIPTION_ID: 4bc82be8-6722-41e6-9a8c-325d154b47c0
+  AZURE_FUNCTIONAPP_NAME: gijiro-flex-plan   # ← デプロイ先 Function App
+  FUNCTIONAPP_RG: ai2                        # ← Function App が存在する RG
+  STORAGE_ACCOUNT_NAME: midac19stoyhggrda5qr5ae
+  STORAGE_RG: general51
 
 jobs:
   deploy-func:
     runs-on: ubuntu-latest
     defaults:
       run:
+        shell: bash
         working-directory: ProcessAudioFunction
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure Login
+      # SPでAzureログイン（Secrets 必須）
+      # 事前に以下をリポジトリSecretsへ:
+      # - AZURE_CLIENT_ID = SP appId
+      # - AZURE_TENANT_ID = tenant id
+      # - AZURE_CLIENT_SECRET = SP password
+      - name: Azure Login (Service Principal)
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Select subscription
+        run: |
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          az account show --query "{name:name, id:id}" -o table
+
+      # 早期にスコープ/存在確認（失敗ならここで止める）
+      - name: Verify Function App
+        run: |
+          az resource show \
+            -g "$FUNCTIONAPP_RG" \
+            -n "$AZURE_FUNCTIONAPP_NAME" \
+            --resource-type "Microsoft.Web/sites" \
+            --query "{id:id, rg:resourceGroup, location:location}" -o table
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: ProcessAudioFunction/requirements.txt
 
-      - name: Install deps (for build)
+      - name: Install dependencies into .python_packages
         run: |
+          python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
 
-      - name: Zip & Deploy
+      - name: Build zip package
         run: |
-          zip -r ../function.zip .
+          rm -f ../function.zip
+          zip -r ../function.zip . -x "__pycache__/*"
+
+      - name: Deploy to Azure Function (zip deploy)
+        run: |
           az functionapp deployment source config-zip \
             --name "$AZURE_FUNCTIONAPP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --resource-group "$FUNCTIONAPP_RG" \
             --src ../function.zip
