@@ -2,73 +2,45 @@ name: Deploy Function (TEST Flex)
 
 on:
   push:
-    branches: [ flex-test ]
+    branches: [ flex-test ]                 # ← テスト専用
     paths:
       - "ProcessAudioFunction/**"
       - ".github/workflows/deploy-function-test.yml"
-  workflow_dispatch:
+  workflow_dispatch:                        # ← 手動実行も可能
 
 env:
-  AZURE_SUBSCRIPTION_ID: 4bc82be8-6722-41e6-9a8c-325d154b47c0
-  AZURE_FUNCTIONAPP_NAME: gijiro-flex-plan
-  FUNCTIONAPP_RG: ai2
-  STORAGE_ACCOUNT_NAME: midac19stoyhggrda5qr5ae
-  STORAGE_RG: general51
+  AZURE_FUNCTIONAPP_NAME: gijiro-flex-plan  # ← テスト用 Function App 名
 
 jobs:
   deploy-func:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: ProcessAudioFunction
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      # ★ ここを修正：client-id/tenant-id/secret ではなく creds(JSON) を渡す
-      - name: Azure Login (Service Principal via creds JSON)
-        uses: azure/login@v2
+      # 本番で成功しているのと同じ認証方式（v1 + AZURE_CREDENTIALS）
+      - name: Azure Login
+        uses: azure/login@v1
         with:
-          creds: >-
-            {"clientId":"${{ secrets.AZURE_CLIENT_ID }}",
-             "clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}",
-             "tenantId":"${{ secrets.AZURE_TENANT_ID }}",
-             "subscriptionId":"${{ env.AZURE_SUBSCRIPTION_ID }}"}
-
-      - name: Select subscription
-        run: |
-          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
-          az account show --query "{name:name, id:id}" -o table
-
-      - name: Verify Function App
-        run: |
-          az resource show \
-            -g "$FUNCTIONAPP_RG" \
-            -n "$AZURE_FUNCTIONAPP_NAME" \
-            --resource-type "Microsoft.Web/sites" \
-            --query "{id:id, rg:resourceGroup, location:location}" -o table
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: ProcessAudioFunction/requirements.txt
+          python-version: '3.12'
 
-      - name: Install dependencies into .python_packages
+      # 必須ではないが、本番ymlに合わせて依存解決のみ実施
+      - name: Install function requirements
+        working-directory: ProcessAudioFunction
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
 
-      - name: Build zip package
-        run: |
-          rm -f ../function.zip
-          zip -r ../function.zip . -x "__pycache__/*"
-
-      - name: Deploy to Azure Function (zip deploy)
-        run: |
-          az functionapp deployment source config-zip \
-            --name "$AZURE_FUNCTIONAPP_NAME" \
-            --resource-group "$FUNCTIONAPP_RG" \
-            --src ../function.zip
+      # Function デプロイ（本番と同じ actions）
+      - name: Deploy to Azure Function
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: ProcessAudioFunction
