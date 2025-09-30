@@ -25,7 +25,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ★旧来のService Principal認証に戻す
+      # 旧来の Service Principal 認証
       - name: Azure Login
         uses: azure/login@v1
         with:
@@ -47,15 +47,13 @@ jobs:
           fi
           echo "Using PKG_PATH=$PKG_PATH"
 
-      # ZIP化
+      # ZIP作成（修正版：ディレクトリ移動なし）
       - name: Create ZIP for RFP
         run: |
           mkdir -p artifacts
-          cd $PKG_PATH
-          zip -r ../artifacts/site.zip . -x ".git/*" ".github/*"
-          cd ..
+          zip -r artifacts/site.zip $PKG_PATH -x ".git/*" ".github/*"
 
-      # RFPデプロイ（ZIP→Blob→URL差し替え）
+      # RFP デプロイ（ZIP→Blob→URL差し替え）
       - name: Deploy via Run From Package
         uses: azure/cli@v2
         with:
@@ -66,7 +64,7 @@ jobs:
             CONTAINER='${{ env.DEPLOY_CONTAINER }}'
             FILE="site-$(date +%Y%m%d%H%M%S).zip"
 
-            # コンテナ作成
+            # コンテナ作成（存在しなければ作成）
             az storage container create \
               --name $CONTAINER \
               --account-name $SA \
@@ -82,7 +80,7 @@ jobs:
               --file artifacts/site.zip \
               --overwrite
 
-            # 短命SAS発行
+            # 短命 SAS 発行
             EXP=$(date -u -d "+20 minutes" '+%Y-%m-%dT%H:%MZ')
             SAS=$(az storage blob generate-sas \
               --account-name $SA \
@@ -96,7 +94,7 @@ jobs:
 
             echo "Deploying package URL: $PKG_URL"
 
-            # RFP用アプリ設定
+            # アプリ設定を RFP に更新
             az webapp config appsettings set \
               -g $RG -n $APP \
               --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
@@ -106,7 +104,7 @@ jobs:
 
 
   # ────────────────────────────────────────────────
-  # 2) Deploy Function App (TEST)  → 従来どおり
+  # 2) Deploy Function App (TEST) → 従来どおり
   # ────────────────────────────────────────────────
   functionapp-test:
     runs-on: ubuntu-latest
