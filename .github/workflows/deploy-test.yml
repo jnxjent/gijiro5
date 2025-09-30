@@ -12,10 +12,12 @@ on:
 env:
   AZURE_WEBAPP_NAME_TEST: gijiro-webapp-flex-test
   AZURE_FUNCTIONAPP_NAME_TEST: gijiro-flex-plan
+  DEPLOY_CONTAINER: deploy               # RFP用Blobコンテナ名
+  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}   # 事前に作成したStorage名
 
 jobs:
   # ───────────────────────────────────────────────────────────
-  # 1) Deploy Web App (TEST)
+  # 1) Deploy Web App (TEST)  → RFP方式
   # ───────────────────────────────────────────────────────────
   webapp-test:
     runs-on: ubuntu-latest
@@ -23,48 +25,89 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v1
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Run-From-Package が残っていると wwwroot を無視されるため明示的にOFF
-      - name: Ensure run-from-package is OFF
+      # ビルドが必要ならここで（Flaskなら不要、Next.js等なら追加）
+      - name: Build (if needed)
         run: |
-          az webapp config appsettings delete -g ai2 -n "$AZURE_WEBAPP_NAME_TEST" \
-            --setting-names WEBSITE_RUN_FROM_PACKAGE WEBSITES_CONTENTAZUREFILECONNECTIONSTRING WEBSITES_CONTENTSHARE || true
+          echo "Add your build steps here if necessary"
+          # 例: npm ci && npm run build
 
-      # デプロイ対象を自動判定（web/ があればそこ、無ければリポジトリ直下）
+      # デプロイ対象を判定（web/ があればそこ）
       - name: Resolve package path
         run: |
           if [ -d "web" ] && [ "$(ls -A web)" ]; then
-            echo "PKG_PATH=web" >> "$GITHUB_ENV"
+            echo "PKG_PATH=web" >> $GITHUB_ENV
           else
-            echo "PKG_PATH=." >> "$GITHUB_ENV"
+            echo "PKG_PATH=." >> $GITHUB_ENV
           fi
           echo "Using PKG_PATH=$PKG_PATH"
 
-      # 可視化 & 空チェック（最低限のファイルが無ければ失敗して原因を明示）
-      - name: Show package contents & ensure not empty
+      # ZIP化
+      - name: Create ZIP for RFP
         run: |
-          echo "=== Listing $PKG_PATH (top 2 levels) ==="
-          find "$PKG_PATH" -maxdepth 2 -type f | sed "s|^| - |" | head -n 200 || true
-          COUNT=$(find "$PKG_PATH" -type f ! -path "*/.git/*" | wc -l)
-          echo "FILE_COUNT=$COUNT"
-          if [ "$COUNT" -lt 2 ]; then
-            echo "::error::Package path '$PKG_PATH' has too few files. Check your repo structure."
-            exit 1
-          fi
+          mkdir -p artifacts
+          cd $PKG_PATH
+          zip -r ../artifacts/site.zip . -x ".git/*" ".github/*"
+          cd ..
 
-      # ZIP Deploy（Kuduが自動解凍。StorageのFW設定に非依存）
-      - name: Deploy to Azure Web App (TEST)
-        uses: azure/webapps-deploy@v2
+      # RFPデプロイ  → BlobにZIPをアップ＆WEBSITE_RUN_FROM_PACKAGEを差し替え
+      - name: Deploy via Run From Package
+        uses: azure/cli@v2
         with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME_TEST }}
-          package: ${{ env.PKG_PATH }}
+          inlineScript: |
+            SA='${{ env.DEPLOY_STORAGE }}'
+            RG='ai2'
+            APP='${{ env.AZURE_WEBAPP_NAME_TEST }}'
+            CONTAINER='${{ env.DEPLOY_CONTAINER }}'
+            FILE="site-$(date +%Y%m%d%H%M%S).zip"
+
+            # コンテナ作成（存在しなければ）
+            az storage container create \
+              --name $CONTAINER \
+              --account-name $SA \
+              --auth-mode login \
+              --public-access off
+
+            # ZIPアップロード
+            az storage blob upload \
+              --account-name $SA \
+              --auth-mode login \
+              --container-name $CONTAINER \
+              --name $FILE \
+              --file artifacts/site.zip \
+              --overwrite
+
+            # 短命SAS発行
+            EXP=$(date -u -d "+20 minutes" '+%Y-%m-%dT%H:%MZ')
+            SAS=$(az storage blob generate-sas \
+              --account-name $SA \
+              --container-name $CONTAINER \
+              --name $FILE \
+              --permissions r \
+              --expiry "$EXP" \
+              --https-only -o tsv)
+
+            PKG_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${FILE}?${SAS}"
+
+            echo "Deploying package URL: $PKG_URL"
+
+            # アプリ設定をRFPに差し替え
+            az webapp config appsettings set \
+              -g $RG -n $APP \
+              --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
+
+            # リスタートで反映
+            az webapp restart -g $RG -n $APP
+
 
   # ───────────────────────────────────────────────────────────
-  # 2) Deploy Function App (TEST)
+  # 2) Deploy Function App (TEST) → 従来どおり（成功していたので変更なし）
   # ───────────────────────────────────────────────────────────
   functionapp-test:
     runs-on: ubuntu-latest
@@ -77,31 +120,27 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # 早めに存在確認（ID/ロケーションを表示）
       - name: Verify Function App exists
         run: |
           az resource show \
             -g ai2 \
             -n "$AZURE_FUNCTIONAPP_NAME_TEST" \
             --resource-type "Microsoft.Web/sites" \
-            --query "{id:id, rg:resourceGroup, location:location}" -o table
+            --query "{id:id, location:location}" -o table
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      # 依存を .python_packages に展開して同梱（Linux Functions 推奨）
       - name: Install function requirements into package
         working-directory: ProcessAudioFunction
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
 
-      # Function デプロイ（ZIP Deploy）
       - name: Deploy to Azure Function (TEST)
         uses: azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME_TEST }}
           package: ProcessAudioFunction
-# trigger Mon Sep 29 08:44:10 UTC 2025
