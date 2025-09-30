@@ -12,30 +12,29 @@ on:
 env:
   AZURE_WEBAPP_NAME_TEST: gijiro-webapp-flex-test
   AZURE_FUNCTIONAPP_NAME_TEST: gijiro-flex-plan
-  DEPLOY_CONTAINER: deploy               # RFP用Blobコンテナ名
-  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}   # 事前に作成したStorage名
+  DEPLOY_CONTAINER: deploy
+  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}
 
 jobs:
-  # ───────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────
   # 1) Deploy Web App (TEST)  → RFP方式
-  # ───────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────
   webapp-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
+      # ★旧来のService Principal認証に戻す
+      - name: Azure Login
+        uses: azure/login@v1
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # ビルドが必要ならここで（Flaskなら不要、Next.js等なら追加）
+      # ビルドが必要ならここで（Flaskなら不要）
       - name: Build (if needed)
         run: |
-          echo "Add your build steps here if necessary"
+          echo "Add build steps here if necessary"
           # 例: npm ci && npm run build
 
       # デプロイ対象を判定（web/ があればそこ）
@@ -56,7 +55,7 @@ jobs:
           zip -r ../artifacts/site.zip . -x ".git/*" ".github/*"
           cd ..
 
-      # RFPデプロイ  → BlobにZIPをアップ＆WEBSITE_RUN_FROM_PACKAGEを差し替え
+      # RFPデプロイ（ZIP→Blob→URL差し替え）
       - name: Deploy via Run From Package
         uses: azure/cli@v2
         with:
@@ -67,7 +66,7 @@ jobs:
             CONTAINER='${{ env.DEPLOY_CONTAINER }}'
             FILE="site-$(date +%Y%m%d%H%M%S).zip"
 
-            # コンテナ作成（存在しなければ）
+            # コンテナ作成
             az storage container create \
               --name $CONTAINER \
               --account-name $SA \
@@ -97,7 +96,7 @@ jobs:
 
             echo "Deploying package URL: $PKG_URL"
 
-            # アプリ設定をRFPに差し替え
+            # RFP用アプリ設定
             az webapp config appsettings set \
               -g $RG -n $APP \
               --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
@@ -106,9 +105,9 @@ jobs:
             az webapp restart -g $RG -n $APP
 
 
-  # ───────────────────────────────────────────────────────────
-  # 2) Deploy Function App (TEST) → 従来どおり（成功していたので変更なし）
-  # ───────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────
+  # 2) Deploy Function App (TEST)  → 従来どおり
+  # ────────────────────────────────────────────────
   functionapp-test:
     runs-on: ubuntu-latest
     steps:
