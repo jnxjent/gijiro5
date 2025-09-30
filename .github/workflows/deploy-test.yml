@@ -13,7 +13,8 @@ env:
   AZURE_WEBAPP_NAME_TEST: gijiro-webapp-flex-test
   AZURE_FUNCTIONAPP_NAME_TEST: gijiro-flex-plan
   DEPLOY_CONTAINER: deploy
-  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}
+  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}  # ← Storageアカウント名（Secretsで設定）
+  DEPLOY_RG: ai2
 
 jobs:
   # ────────────────────────────────────────────────
@@ -31,11 +32,26 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # ビルドが必要ならここで（Flaskなら不要）
-      - name: Build (if needed)
-        run: |
-          echo "Add build steps here if necessary"
-          # 例: npm ci && npm run build
+      # 現状の Storage FW を可視化（トラブル時に原因が一目）
+      - name: Show current storage firewall
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            SA='${{ env.DEPLOY_STORAGE }}'
+            RG='${{ env.DEPLOY_RG }}'
+            echo "Storage account: $SA (RG=$RG)"
+            az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
+
+      # ▼ デプロイ直前だけ一時的に開ける（default-action を Allow に）
+      - name: [TEMP] Open storage firewall for deployment
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            SA='${{ env.DEPLOY_STORAGE }}'
+            RG='${{ env.DEPLOY_RG }}'
+            az storage account update -n $SA -g $RG --default-action Allow
+            echo "Network rule set (after opening):"
+            az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
 
       # デプロイ対象を判定（web/ があればそこ）
       - name: Resolve package path
@@ -47,7 +63,7 @@ jobs:
           fi
           echo "Using PKG_PATH=$PKG_PATH"
 
-      # ZIP作成（修正版：ディレクトリ移動なし）
+      # ZIP作成（cdせずに安全に作る）
       - name: Create ZIP for RFP
         run: |
           mkdir -p artifacts
@@ -59,12 +75,12 @@ jobs:
         with:
           inlineScript: |
             SA='${{ env.DEPLOY_STORAGE }}'
-            RG='ai2'
+            RG='${{ env.DEPLOY_RG }}'
             APP='${{ env.AZURE_WEBAPP_NAME_TEST }}'
             CONTAINER='${{ env.DEPLOY_CONTAINER }}'
             FILE="site-$(date +%Y%m%d%H%M%S).zip"
 
-            # コンテナ作成（存在しなければ作成）
+            # コンテナ作成（存在しなければ）
             az storage container create \
               --name $CONTAINER \
               --account-name $SA \
@@ -91,16 +107,24 @@ jobs:
               --https-only -o tsv)
 
             PKG_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${FILE}?${SAS}"
-
             echo "Deploying package URL: $PKG_URL"
 
-            # アプリ設定を RFP に更新
-            az webapp config appsettings set \
-              -g $RG -n $APP \
-              --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
-
-            # リスタートで反映
+            # アプリ設定を RFP に更新して再起動
+            az webapp config appsettings set -g $RG -n $APP --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
             az webapp restart -g $RG -n $APP
+
+      # ▼ 終了後は必ず元に戻す（失敗しても実行される）
+      - name: [TEMP] Close storage firewall after deployment
+        if: always()
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            SA='${{ env.DEPLOY_STORAGE }}'
+            RG='${{ env.DEPLOY_RG }}'
+            # もともと Deny 運用の場合は Deny に戻す。Allow運用にするならこのステップは削除。
+            az storage account update -n $SA -g $RG --default-action Deny
+            echo "Network rule set (after closing):"
+            az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
 
 
   # ────────────────────────────────────────────────
@@ -121,7 +145,7 @@ jobs:
         run: |
           az resource show \
             -g ai2 \
-            -n "$AZURE_FUNCTIONAPP_NAME_TEST" \
+            -n "${{ env.AZURE_FUNCTIONAPP_NAME_TEST }}" \
             --resource-type "Microsoft.Web/sites" \
             --query "{id:id, location:location}" -o table
 
