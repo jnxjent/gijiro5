@@ -10,15 +10,19 @@ on:
   workflow_dispatch: {}
 
 env:
+  # --- Targets ---
   AZURE_WEBAPP_NAME_TEST: gijiro-webapp-flex-test
   AZURE_FUNCTIONAPP_NAME_TEST: gijiro-flex-plan
+
+  # --- Storage for RFP package ---
+  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}   # Storage アカウント名（Secrets）
   DEPLOY_CONTAINER: deploy
-  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}  # ← Storageアカウント名（Secretsで設定）
-  DEPLOY_RG: ai2
+  STORAGE_RG: general51    # ← Storage が属するRG（修正）
+  WEBAPP_RG: ai2           # ← Web App/Function が属するRG（従来どおり）
 
 jobs:
   # ────────────────────────────────────────────────
-  # 1) Deploy Web App (TEST)  → RFP方式
+  # 1) Deploy Web App (TEST) → RFP方式
   # ────────────────────────────────────────────────
   webapp-test:
     runs-on: ubuntu-latest
@@ -32,23 +36,23 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # 現状の Storage FW を可視化（トラブル時に原因が一目）
+      # Storage FW を可視化（Storage側のRGを使用）
       - name: Show current storage firewall
         uses: azure/cli@v2
         with:
           inlineScript: |
             SA='${{ env.DEPLOY_STORAGE }}'
-            RG='${{ env.DEPLOY_RG }}'
+            RG='${{ env.STORAGE_RG }}'
             echo "Storage account: $SA (RG=$RG)"
             az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
 
-      # ▼ デプロイ直前だけ一時的に開ける（default-action を Allow に）
+      # ▼ 一時的に Storage を Allow に（Storage側のRGを使用）
       - name: [TEMP] Open storage firewall for deployment
         uses: azure/cli@v2
         with:
           inlineScript: |
             SA='${{ env.DEPLOY_STORAGE }}'
-            RG='${{ env.DEPLOY_RG }}'
+            RG='${{ env.STORAGE_RG }}'
             az storage account update -n $SA -g $RG --default-action Allow
             echo "Network rule set (after opening):"
             az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
@@ -63,7 +67,7 @@ jobs:
           fi
           echo "Using PKG_PATH=$PKG_PATH"
 
-      # ZIP作成（cdせずに安全に作る）
+      # ZIP作成（cdしない安全版）
       - name: Create ZIP for RFP
         run: |
           mkdir -p artifacts
@@ -75,19 +79,20 @@ jobs:
         with:
           inlineScript: |
             SA='${{ env.DEPLOY_STORAGE }}'
-            RG='${{ env.DEPLOY_RG }}'
+            SRG='${{ env.STORAGE_RG }}'
+            WRG='${{ env.WEBAPP_RG }}'
             APP='${{ env.AZURE_WEBAPP_NAME_TEST }}'
             CONTAINER='${{ env.DEPLOY_CONTAINER }}'
             FILE="site-$(date +%Y%m%d%H%M%S).zip"
 
-            # コンテナ作成（存在しなければ）
+            # コンテナ作成（Storage側RGは不要だが変数名を揃えて可読性維持）
             az storage container create \
               --name $CONTAINER \
               --account-name $SA \
               --auth-mode login \
               --public-access off
 
-            # ZIPアップロード
+            # ZIP アップロード
             az storage blob upload \
               --account-name $SA \
               --auth-mode login \
@@ -109,19 +114,18 @@ jobs:
             PKG_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${FILE}?${SAS}"
             echo "Deploying package URL: $PKG_URL"
 
-            # アプリ設定を RFP に更新して再起動
-            az webapp config appsettings set -g $RG -n $APP --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
-            az webapp restart -g $RG -n $APP
+            # WebApp（ai2）側に RFP 設定を反映
+            az webapp config appsettings set -g $WRG -n $APP --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
+            az webapp restart -g $WRG -n $APP
 
-      # ▼ 終了後は必ず元に戻す（失敗しても実行される）
+      # ▼ 終了後は必ず元に戻す（Storage側のRGを使用）
       - name: [TEMP] Close storage firewall after deployment
         if: always()
         uses: azure/cli@v2
         with:
           inlineScript: |
             SA='${{ env.DEPLOY_STORAGE }}'
-            RG='${{ env.DEPLOY_RG }}'
-            # もともと Deny 運用の場合は Deny に戻す。Allow運用にするならこのステップは削除。
+            RG='${{ env.STORAGE_RG }}'
             az storage account update -n $SA -g $RG --default-action Deny
             echo "Network rule set (after closing):"
             az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
@@ -144,7 +148,7 @@ jobs:
       - name: Verify Function App exists
         run: |
           az resource show \
-            -g ai2 \
+            -g ${{ env.WEBAPP_RG }} \
             -n "${{ env.AZURE_FUNCTIONAPP_NAME_TEST }}" \
             --resource-type "Microsoft.Web/sites" \
             --query "{id:id, location:location}" -o table
