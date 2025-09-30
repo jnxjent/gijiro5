@@ -10,32 +10,27 @@ on:
   workflow_dispatch: {}
 
 env:
-  # --- Targets ---
   AZURE_WEBAPP_NAME_TEST: gijiro-webapp-flex-test
   AZURE_FUNCTIONAPP_NAME_TEST: gijiro-flex-plan
 
-  # --- Storage for RFP package ---
-  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}   # Storage アカウント名（Secrets）
+  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}
   DEPLOY_CONTAINER: deploy
-  STORAGE_RG: general51    # ← Storage が属するRG（修正）
-  WEBAPP_RG: ai2           # ← Web App/Function が属するRG（従来どおり）
+  STORAGE_RG: general51
+  WEBAPP_RG: ai2
 
 jobs:
-  # ────────────────────────────────────────────────
-  # 1) Deploy Web App (TEST) → RFP方式
-  # ────────────────────────────────────────────────
   webapp-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 旧来の Service Principal 認証
       - name: Azure Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+<<<<<<< HEAD
       # Storage FW を可視化（Storage側のRGを使用）
       - name: Show current storage firewall
         uses: azure/cli@v2
@@ -58,6 +53,8 @@ jobs:
             az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
 
       # デプロイ対象を判定（web/ があればそこ）
+=======
+>>>>>>> 4765e7d (Switch WebApp deploy to Run From Package)
       - name: Resolve package path
         run: |
           if [ -d "web" ] && [ "$(ls -A web)" ]; then
@@ -65,34 +62,30 @@ jobs:
           else
             echo "PKG_PATH=." >> $GITHUB_ENV
           fi
-          echo "Using PKG_PATH=$PKG_PATH"
 
-      # ZIP作成（cdしない安全版）
       - name: Create ZIP for RFP
         run: |
           mkdir -p artifacts
           zip -r artifacts/site.zip $PKG_PATH -x ".git/*" ".github/*"
 
-      # RFP デプロイ（ZIP→Blob→URL差し替え）
       - name: Deploy via Run From Package
         uses: azure/cli@v2
         with:
           inlineScript: |
             SA='${{ env.DEPLOY_STORAGE }}'
-            SRG='${{ env.STORAGE_RG }}'
             WRG='${{ env.WEBAPP_RG }}'
             APP='${{ env.AZURE_WEBAPP_NAME_TEST }}'
             CONTAINER='${{ env.DEPLOY_CONTAINER }}'
             FILE="site-$(date +%Y%m%d%H%M%S).zip"
 
-            # コンテナ作成（Storage側RGは不要だが変数名を揃えて可読性維持）
+            # コンテナ作成（存在しなければ）
             az storage container create \
               --name $CONTAINER \
               --account-name $SA \
               --auth-mode login \
               --public-access off
 
-            # ZIP アップロード
+            # ZIPアップロード
             az storage blob upload \
               --account-name $SA \
               --auth-mode login \
@@ -114,10 +107,10 @@ jobs:
             PKG_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${FILE}?${SAS}"
             echo "Deploying package URL: $PKG_URL"
 
-            # WebApp（ai2）側に RFP 設定を反映
             az webapp config appsettings set -g $WRG -n $APP --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
             az webapp restart -g $WRG -n $APP
 
+<<<<<<< HEAD
       # ▼ 終了後は必ず元に戻す（Storage側のRGを使用）
       - name: "[TEMP] Close storage firewall after deployment"
         if: always()
@@ -134,6 +127,8 @@ jobs:
   # ────────────────────────────────────────────────
   # 2) Deploy Function App (TEST) → 従来どおり
   # ────────────────────────────────────────────────
+=======
+>>>>>>> 4765e7d (Switch WebApp deploy to Run From Package)
   functionapp-test:
     runs-on: ubuntu-latest
     steps:
