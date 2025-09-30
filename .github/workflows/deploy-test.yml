@@ -47,7 +47,7 @@ jobs:
             az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
 
       # ▼ 一時的に Storage を Allow に（Storage側のRGを使用）
-      - name: [TEMP] Open storage firewall for deployment
+      - name: "[TEMP] Open storage firewall for deployment"
         uses: azure/cli@v2
         with:
           inlineScript: |
@@ -119,7 +119,7 @@ jobs:
             az webapp restart -g $WRG -n $APP
 
       # ▼ 終了後は必ず元に戻す（Storage側のRGを使用）
-      - name: [TEMP] Close storage firewall after deployment
+      - name: "[TEMP] Close storage firewall after deployment"
         if: always()
         uses: azure/cli@v2
         with:
