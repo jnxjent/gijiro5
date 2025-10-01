@@ -2,165 +2,69 @@ name: Deploy Gijiro3 TEST (Web & Function)
 
 on:
   push:
-    branches: [ flex-test ]
-    paths:
-      - "web/**"
-      - "ProcessAudioFunction/**"
-      - ".github/workflows/deploy-test.yml"
-  workflow_dispatch: {}
-
-env:
-  AZURE_WEBAPP_NAME_TEST: gijiro-webapp-flex-test
-  AZURE_FUNCTIONAPP_NAME_TEST: gijiro-flex-plan
-
-  DEPLOY_STORAGE: ${{ secrets.DEPLOY_STORAGE_ACCOUNT }}
-  DEPLOY_CONTAINER: deploy
-  STORAGE_RG: general51
-  WEBAPP_RG: ai2
+    branches:
+      - flex-test
 
 jobs:
+  # ───────────────────────────────────────────────────────────
+  # 1) Deploy Web App (TEST)
+  # ───────────────────────────────────────────────────────────
   webapp-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Azure Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-<<<<<<< HEAD
-      # Storage FW を可視化（Storage側のRGを使用）
-      - name: Show current storage firewall
-        uses: azure/cli@v2
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          inlineScript: |
-            SA='${{ env.DEPLOY_STORAGE }}'
-            RG='${{ env.STORAGE_RG }}'
-            echo "Storage account: $SA (RG=$RG)"
-            az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
+          python-version: '3.12'
 
-      # ▼ 一時的に Storage を Allow に（Storage側のRGを使用）
-      - name: "[TEMP] Open storage firewall for deployment"
-        uses: azure/cli@v2
-        with:
-          inlineScript: |
-            SA='${{ env.DEPLOY_STORAGE }}'
-            RG='${{ env.STORAGE_RG }}'
-            az storage account update -n $SA -g $RG --default-action Allow
-            echo "Network rule set (after opening):"
-            az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
-
-      # デプロイ対象を判定（web/ があればそこ）
-=======
->>>>>>> 4765e7d (Switch WebApp deploy to Run From Package)
-      - name: Resolve package path
+      - name: Install dependencies
         run: |
-          if [ -d "web" ] && [ "$(ls -A web)" ]; then
-            echo "PKG_PATH=web" >> $GITHUB_ENV
-          else
-            echo "PKG_PATH=." >> $GITHUB_ENV
-          fi
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
 
-      - name: Create ZIP for RFP
-        run: |
-          mkdir -p artifacts
-          zip -r artifacts/site.zip $PKG_PATH -x ".git/*" ".github/*"
-
-      - name: Deploy via Run From Package
-        uses: azure/cli@v2
+      - name: Deploy to Azure Web App (TEST)
+        uses: azure/webapps-deploy@v2
         with:
-          inlineScript: |
-            SA='${{ env.DEPLOY_STORAGE }}'
-            WRG='${{ env.WEBAPP_RG }}'
-            APP='${{ env.AZURE_WEBAPP_NAME_TEST }}'
-            CONTAINER='${{ env.DEPLOY_CONTAINER }}'
-            FILE="site-$(date +%Y%m%d%H%M%S).zip"
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME_TEST }}
+          package: .
 
-            # コンテナ作成（存在しなければ）
-            az storage container create \
-              --name $CONTAINER \
-              --account-name $SA \
-              --auth-mode login \
-              --public-access off
-
-            # ZIPアップロード
-            az storage blob upload \
-              --account-name $SA \
-              --auth-mode login \
-              --container-name $CONTAINER \
-              --name $FILE \
-              --file artifacts/site.zip \
-              --overwrite
-
-            # 短命 SAS 発行
-            EXP=$(date -u -d "+20 minutes" '+%Y-%m-%dT%H:%MZ')
-            SAS=$(az storage blob generate-sas \
-              --account-name $SA \
-              --container-name $CONTAINER \
-              --name $FILE \
-              --permissions r \
-              --expiry "$EXP" \
-              --https-only -o tsv)
-
-            PKG_URL="https://${SA}.blob.core.windows.net/${CONTAINER}/${FILE}?${SAS}"
-            echo "Deploying package URL: $PKG_URL"
-
-            az webapp config appsettings set -g $WRG -n $APP --settings WEBSITE_RUN_FROM_PACKAGE="$PKG_URL"
-            az webapp restart -g $WRG -n $APP
-
-<<<<<<< HEAD
-      # ▼ 終了後は必ず元に戻す（Storage側のRGを使用）
-      - name: "[TEMP] Close storage firewall after deployment"
-        if: always()
-        uses: azure/cli@v2
-        with:
-          inlineScript: |
-            SA='${{ env.DEPLOY_STORAGE }}'
-            RG='${{ env.STORAGE_RG }}'
-            az storage account update -n $SA -g $RG --default-action Deny
-            echo "Network rule set (after closing):"
-            az storage account show -n $SA -g $RG --query "networkRuleSet" -o json
-
-
-  # ────────────────────────────────────────────────
-  # 2) Deploy Function App (TEST) → 従来どおり
-  # ────────────────────────────────────────────────
-=======
->>>>>>> 4765e7d (Switch WebApp deploy to Run From Package)
+  # ───────────────────────────────────────────────────────────
+  # 2) Deploy Function App (TEST)
+  # ───────────────────────────────────────────────────────────
   functionapp-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Azure Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Verify Function App exists
-        run: |
-          az resource show \
-            -g ${{ env.WEBAPP_RG }} \
-            -n "${{ env.AZURE_FUNCTIONAPP_NAME_TEST }}" \
-            --resource-type "Microsoft.Web/sites" \
-            --query "{id:id, location:location}" -o table
-
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.12'
 
-      - name: Install function requirements into package
+      - name: Install function requirements
         working-directory: ProcessAudioFunction
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
 
       - name: Deploy to Azure Function (TEST)
         uses: azure/functions-action@v1
         with:
-          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME_TEST }}
+          app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME_TEST }}
           package: ProcessAudioFunction
