@@ -2,18 +2,12 @@
   "$schema": "http://json.schemastore.org/proxies",
   "proxies": {
     "health-proxy": {
-      "matchCondition": {
-        "methods": [ "GET" ],
-        "route": "/api/health"
-      },
-      "backendUri": "https://processaudiofunction-gijiro.azurewebsites.net/api/health"
+      "matchCondition": { "methods": [ "GET" ], "route": "/api/health" },
+      "backendUri": "%BACKEND_BASE%/api/health"
     },
     "process-proxy": {
-      "matchCondition": {
-        "methods": [ "POST" ],
-        "route": "/api/process"
-      },
-      "backendUri": "https://processaudiofunction-gijiro.azurewebsites.net/api/ProcessAudioFunction"
+      "matchCondition": { "methods": [ "POST" ], "route": "/api/process" },
+      "backendUri": "%BACKEND_BASE%/api/processaudio"
     }
   }
 }

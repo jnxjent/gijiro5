@@ -31,3 +31,10 @@ testvenv/
 # Local dev
 .venv*/
 ping.txt
+
+# local-only / artifacts
+ProcessAudioFunction/local.settings.json
+*.zip
+build_artifact/
+ai.json
+gijiro_webapp_backup.json
