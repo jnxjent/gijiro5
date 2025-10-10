@@ -6,7 +6,7 @@
       "name": "msg",
       "type": "queueTrigger",
       "direction": "in",
-      "queueName": "audio-processing-flex",
+      "queueName": "audio-processing",
       "connection": "AzureWebJobsStorage"
     }
   ]
