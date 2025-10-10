@@ -19,7 +19,7 @@ from pydub import AudioSegment
 import azure.functions as func
 
 from storage import download_blob, upload_to_blob
-from kowake import transcribe_and_correct
+# ※ kowake は遅延 import に変更（下で main() 内で import）
 from extraction import extract_meeting_info_and_speakers
 from docwriter import process_document
 
@@ -33,11 +33,13 @@ TMP_DIR = tempfile.gettempdir()
 TMP_FFMPEG = os.path.join(TMP_DIR, "ffmpeg")
 TMP_FFPROBE = os.path.join(TMP_DIR, "ffprobe")
 
+
 def _is_file(path: str) -> bool:
     try:
         return bool(path) and os.path.isfile(path)
     except Exception:
         return False
+
 
 def _exec_succeeds(bin_path: str) -> bool:
     """実際に `-version` を叩いて実行可否を確認（noexec 検出にも有効）"""
@@ -47,11 +49,13 @@ def _exec_succeeds(bin_path: str) -> bool:
     except Exception:
         return False
 
+
 def _same_size(a: str, b: str) -> bool:
     try:
         return os.path.getsize(a) == os.path.getsize(b)
     except Exception:
         return False
+
 
 def _ensure_tmp(src: str, dst: str) -> str:
     """
@@ -65,16 +69,19 @@ def _ensure_tmp(src: str, dst: str) -> str:
         os.replace(tmp_dst, dst)
     return dst
 
+
 def _pick_first_existing(paths: list[str]) -> str:
     for p in paths:
         if _is_file(p):
             return p
     return ""
 
+
 def _candidate_paths_from_env() -> tuple[list[str], list[str]]:
     """環境変数→既知配置の順で候補を並べる"""
-    env_ff = os.environ.get("FFMPEG_BINARY") or ""
-    env_fp = os.environ.get("FFPROBE_BINARY") or ""
+    # App Settings / 環境変数の両方を見に行く（空は無視）
+    env_ff = os.environ.get("FFMPEG_BINARY") or os.environ.get("FFMPEG_PATH") or ""
+    env_fp = os.environ.get("FFPROBE_BINARY") or os.environ.get("FFPROBE_PATH") or ""
 
     ffmpeg_candidates = [
         env_ff,
@@ -90,10 +97,11 @@ def _candidate_paths_from_env() -> tuple[list[str], list[str]]:
         "/home/site/ffmpeg-bin/bin/ffprobe",
         "/home/site/wwwroot/ffprobe",
     ]
-    # から文字や重複を除去
+    # 空文字と重複を除去
     ffmpeg_candidates = [p for p in dict.fromkeys(ffmpeg_candidates) if p]
     ffprobe_candidates = [p for p in dict.fromkeys(ffprobe_candidates) if p]
     return ffmpeg_candidates, ffprobe_candidates
+
 
 def resolve_ffmpeg_and_ffprobe() -> tuple[str, str]:
     """
@@ -102,6 +110,7 @@ def resolve_ffmpeg_and_ffprobe() -> tuple[str, str]:
     - 直接実行できるならそれを使う
     - できなければ /tmp に実体コピーしてそこを使う
     - 最後に `-version` で実行確認
+    - PATH / pydub / 環境変数 (BINARY/ PATH) をすべて /tmp 実体に統一
     """
     ff_candidates, fp_candidates = _candidate_paths_from_env()
     logger.info(f"[ffmpeg-check] candidates ffmpeg={ff_candidates}")
@@ -129,12 +138,18 @@ def resolve_ffmpeg_and_ffprobe() -> tuple[str, str]:
             logger.error("[ffmpeg-check] /tmp fallback also failed to execute")
             raise RuntimeError("ffmpeg/ffprobe not executable even after /tmp fallback")
 
-    # pydub / 環境変数を更新
+    # pydub / 環境変数を更新（/tmp 実体で統一）
     os.environ["FFMPEG_BINARY"] = ff_bin
     os.environ["FFPROBE_BINARY"] = fp_bin
+    os.environ["FFMPEG_PATH"] = ff_bin          # ← kowake が最優先で参照
+    os.environ["FFPROBE_PATH"] = fp_bin         # ← kowake が最優先で参照
+
     AudioSegment.converter = ff_bin
     AudioSegment.ffprobe = fp_bin
-    os.environ["PATH"] = str(Path(ff_bin).parent) + os.pathsep + os.environ.get("PATH", "")
+
+    # PATH 先頭に追加
+    bin_dir = str(Path(ff_bin).parent)
+    os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
 
     # 版表示（デバッグ）
     try:
@@ -143,9 +158,10 @@ def resolve_ffmpeg_and_ffprobe() -> tuple[str, str]:
     except Exception:
         logger.warning("[ffmpeg-check] could not print ffmpeg version")
 
-    logger.info(f"▶▶ Using FFMPEG_BINARY  : {ff_bin}")
-    logger.info(f"▶▶ Using FFPROBE_BINARY : {fp_bin}")
+    logger.info(f"▶▶ Using FFMPEG:  {ff_bin}")
+    logger.info(f"▶▶ Using FFPROBE: {fp_bin}")
     return ff_bin, fp_bin
+
 
 logger.info("▶▶ Module import success (ffmpeg resolution will run at invocation)")
 
@@ -159,6 +175,9 @@ async def main(msg: func.QueueMessage) -> None:
     except Exception:
         logger.exception("▶▶ FFMPEG/FFPROBE resolution failed")
         raise
+
+    # ★ 遅延 import：ここで ffmpeg 環境が整った後にロード
+    from kowake import transcribe_and_correct
 
     raw = msg.get_body().decode("utf-8", errors="replace")
     logger.info("▶▶ RAW payload: %s", raw)
