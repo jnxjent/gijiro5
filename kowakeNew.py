@@ -413,4 +413,4 @@ def _save_keywords_to_blob():
             upload_to_blob(BLOB_JSON_PATH, f)
         print("[INFO] キーワード保存完了")
     except Exception as e:
-        print(f"[ERROR] キーワード保存失敗: {e}")
+        print(f"[ERROR] キーワード保存失敗: {e}"

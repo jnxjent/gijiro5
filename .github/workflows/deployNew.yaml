@@ -3,7 +3,7 @@ name: Deploy Gijiro3 (Web & Function)
 on:
   push:
     branches:
-      - flex-test
+      - master
 
 jobs:
   # ───────────────────────────────────────────────────────────
@@ -20,7 +20,7 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # （必要なら残す。ビルド不要なら削ってOK）
+      # （必要なら残す。ビルドが不要なら削ってOK）
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
@@ -53,6 +53,7 @@ jobs:
   # 2) Deploy Function App（publish profile で確実にZIPデプロイ）
   # ───────────────────────────────────────────────────────────
   functionapp:
+    # 順番を明示（任意）：Web完了後にFunction
     needs: webapp
     runs-on: ubuntu-latest
     steps:
@@ -64,7 +65,7 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # ※ functions-action は Python セットアップ不要（入れても害なし）
+      # ※ functions-action は Python セットアップ不要。入れても害なし
       - name: Deploy to Azure Function
         uses: azure/functions-action@v1
         with:
