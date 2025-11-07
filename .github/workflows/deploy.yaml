@@ -17,12 +17,15 @@ jobs:
 
       # Web用ZIP（Functionは除外）
       - name: Build web artifact (zip)
+        shell: bash
         run: |
+          set -euxo pipefail
           zip -r build.zip . \
             -x "ProcessAudioFunction/**" \
                ".git/**" ".github/**" ".venv/**" \
                "*/__pycache__/**" "*.log" "*.tar" "*.tar.gz" "*.zip" \
                "GIJIRO BACKUP/**" "GIJIRO_BACKUP/**" "backup/**" "BACKUP/**"
+          ls -lh build.zip
 
       - name: Deploy to Azure Web App (ZipDeploy)
         uses: azure/webapps-deploy@v3
@@ -31,7 +34,7 @@ jobs:
           package: build.zip
           clean: true
 
-  functionapp:                # ← ← ← jobs の直下に並列で定義（重要）
+  functionapp:
     needs: webapp
     runs-on: ubuntu-latest
     steps:
@@ -46,20 +49,21 @@ jobs:
       - name: Build function artifact (zip with host.json)
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
           ls -la
           test -f host.json || { echo "::error::host.json がありません"; exit 1; }
           test -d ProcessAudioFunction || { echo "::error::ProcessAudioFunction/ がありません"; exit 1; }
           zip -r function.zip host.json requirements.txt ProcessAudioFunction/ \
             -x "*/__pycache__/*" "*.log" || true
+          test -s function.zip || { echo "::error::function.zip が見つからない/サイズ0"; exit 1; }
           ls -lh function.zip
 
       - name: Deploy Function (config-zip)
+        shell: bash
         run: |
-          az functionapp deployment source config-zip \
-            -g ai2 \
-            -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }} \
-            --src function.zip
+          set -euxo pipefail
+          az functionapp deployment source config-zip -g ai2 -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --src function.zip
 
       - name: Restart Function App
+        shell: bash
         run: az functionapp restart -g ai2 -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }}
