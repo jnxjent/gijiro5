@@ -8,8 +8,8 @@
   "extensions": {
     "queues": {
       "messageEncoding": "None",
-      "maxDequeueCount": 100,
-      "visibilityTimeout": "01:00:00"
+      "maxDequeueCount": 3,
+      "visibilityTimeout": "00:20:00"
     }
   },
   "logging": {

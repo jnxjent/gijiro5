@@ -1,10 +1,4 @@
-import logging
-
-# ─── ロガー初期化 ─────────────────────────────────────────
-logger = logging.getLogger("ProcessAudioFunction")
-logger.setLevel(logging.INFO)
-logger.info("▶▶ Module import start")
-
+# ProcessAudioFunction/__init__.py
 import os
 import json
 import base64
@@ -14,25 +8,35 @@ import uuid
 from pathlib import Path
 import shutil
 import stat
+import datetime
+import logging
 
+from typing import List
 from pydub import AudioSegment
 import azure.functions as func
 
+from azure.storage.blob import BlobServiceClient
+from azure.core.exceptions import ResourceExistsError, ResourceModifiedError
+
 from storage import download_blob, upload_to_blob
-from kowake import transcribe_and_correct
+# kowake は ffmpeg 解決後に import（遅延）
 from extraction import extract_meeting_info_and_speakers
 from docwriter import process_document
 
-# ─────────────────────────────────────────────────────────
-# ffmpeg/ffprobe 解決（/tmp フォールバック：実行時に行う）
-#   - import 時には絶対に例外を投げない（ワーカー読み込みを阻害しない）
-#   - 実行不可(noexec)や /tmp 不在を検出したら /tmp に実体コピーして実行確認
-# ─────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────
+# 一時ディレクトリなど
+# ─────────────────────────────────────────────────────────
 TMP_DIR = tempfile.gettempdir()
 TMP_FFMPEG = os.path.join(TMP_DIR, "ffmpeg")
 TMP_FFPROBE = os.path.join(TMP_DIR, "ffprobe")
 
+# ─────────────────────────────────────────────────────────
+# ffmpeg/ffprobe 解決（/tmp フォールバック）
+#   - import 時に例外は投げない
+#   - 実行不可(noexec)なら /tmp に実体コピーして実行確認
+# ─────────────────────────────────────────────────────────
 def _is_file(path: str) -> bool:
     try:
         return bool(path) and os.path.isfile(path)
@@ -40,7 +44,6 @@ def _is_file(path: str) -> bool:
         return False
 
 def _exec_succeeds(bin_path: str) -> bool:
-    """実際に `-version` を叩いて実行可否を確認（noexec 検出にも有効）"""
     try:
         subprocess.check_output([bin_path, "-version"], stderr=subprocess.STDOUT, timeout=5)
         return True
@@ -54,9 +57,6 @@ def _same_size(a: str, b: str) -> bool:
         return False
 
 def _ensure_tmp(src: str, dst: str) -> str:
-    """
-    src から /tmp の dst へ必要時のみコピー。+x を付与して原子的に置換。
-    """
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if not os.path.exists(dst) or not _same_size(src, dst):
         tmp_dst = dst + ".tmp"
@@ -65,16 +65,15 @@ def _ensure_tmp(src: str, dst: str) -> str:
         os.replace(tmp_dst, dst)
     return dst
 
-def _pick_first_existing(paths: list[str]) -> str:
+def _pick_first_existing(paths: List[str]) -> str:
     for p in paths:
         if _is_file(p):
             return p
     return ""
 
-def _candidate_paths_from_env() -> tuple[list[str], list[str]]:
-    """環境変数→既知配置の順で候補を並べる"""
-    env_ff = os.environ.get("FFMPEG_BINARY") or ""
-    env_fp = os.environ.get("FFPROBE_BINARY") or ""
+def _candidate_paths_from_env():
+    env_ff = os.environ.get("FFMPEG_BINARY") or os.environ.get("FFMPEG_PATH") or ""
+    env_fp = os.environ.get("FFPROBE_BINARY") or os.environ.get("FFPROBE_PATH") or ""
 
     ffmpeg_candidates = [
         env_ff,
@@ -90,19 +89,12 @@ def _candidate_paths_from_env() -> tuple[list[str], list[str]]:
         "/home/site/ffmpeg-bin/bin/ffprobe",
         "/home/site/wwwroot/ffprobe",
     ]
-    # から文字や重複を除去
+    # 空と重複を除去
     ffmpeg_candidates = [p for p in dict.fromkeys(ffmpeg_candidates) if p]
     ffprobe_candidates = [p for p in dict.fromkeys(ffprobe_candidates) if p]
     return ffmpeg_candidates, ffprobe_candidates
 
-def resolve_ffmpeg_and_ffprobe() -> tuple[str, str]:
-    """
-    実行時に ffmpeg/ffprobe を解決。
-    - 候補から source を見つける
-    - 直接実行できるならそれを使う
-    - できなければ /tmp に実体コピーしてそこを使う
-    - 最後に `-version` で実行確認
-    """
+def resolve_ffmpeg_and_ffprobe():
     ff_candidates, fp_candidates = _candidate_paths_from_env()
     logger.info(f"[ffmpeg-check] candidates ffmpeg={ff_candidates}")
     logger.info(f"[ffmpeg-check] candidates ffprobe={fp_candidates}")
@@ -117,7 +109,7 @@ def resolve_ffmpeg_and_ffprobe() -> tuple[str, str]:
         logger.error("FFPROBE binary not found in candidates.")
         raise RuntimeError("FFPROBE binary not found.")
 
-    # まずは source を直接実行してみる（noexec の早期検出）
+    # 直接実行できる？
     if _exec_succeeds(ff_src) and _exec_succeeds(fp_src):
         ff_bin, fp_bin = ff_src, fp_src
         logger.info("[ffmpeg-check] direct execute OK")
@@ -126,15 +118,21 @@ def resolve_ffmpeg_and_ffprobe() -> tuple[str, str]:
         ff_bin = _ensure_tmp(ff_src, TMP_FFMPEG)
         fp_bin = _ensure_tmp(fp_src, TMP_FFPROBE)
         if not (_exec_succeeds(ff_bin) and _exec_succeeds(fp_bin)):
-            logger.error("[ffmpeg-check] /tmp fallback also failed to execute")
+            logger.error("[ffmpeg-check] /tmp fallback also failed")
             raise RuntimeError("ffmpeg/ffprobe not executable even after /tmp fallback")
 
-    # pydub / 環境変数を更新
+    # pydub / 環境変数を更新（/tmp 実体で統一）
     os.environ["FFMPEG_BINARY"] = ff_bin
     os.environ["FFPROBE_BINARY"] = fp_bin
+    os.environ["FFMPEG_PATH"] = ff_bin
+    os.environ["FFPROBE_PATH"] = fp_bin
+
     AudioSegment.converter = ff_bin
     AudioSegment.ffprobe = fp_bin
-    os.environ["PATH"] = str(Path(ff_bin).parent) + os.pathsep + os.environ.get("PATH", "")
+
+    # PATH 先頭に追加
+    bin_dir = str(Path(ff_bin).parent)
+    os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
 
     # 版表示（デバッグ）
     try:
@@ -143,35 +141,72 @@ def resolve_ffmpeg_and_ffprobe() -> tuple[str, str]:
     except Exception:
         logger.warning("[ffmpeg-check] could not print ffmpeg version")
 
-    logger.info(f"▶▶ Using FFMPEG_BINARY  : {ff_bin}")
-    logger.info(f"▶▶ Using FFPROBE_BINARY : {fp_bin}")
+    logger.info(f"▶▶ Using FFMPEG:  {ff_bin}")
+    logger.info(f"▶▶ Using FFPROBE: {fp_bin}")
     return ff_bin, fp_bin
 
 logger.info("▶▶ Module import success (ffmpeg resolution will run at invocation)")
 
 # ─── Function 本体 ────────────────────────────────────────
+# ※ Azure Functions の Queue Trigger は sync 推奨ですが、
+#   既存実装に合わせて async を維持します。
 async def main(msg: func.QueueMessage) -> None:
     logger.info("▶▶ Function invoked")
+
+    raw = msg.get_body().decode("utf-8", errors="replace")
+    logger.info("▶▶ RAW payload: %s", raw)
+
+    # JSON / Base64 自動判定
+    try:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            decoded = base64.b64decode(raw).decode("utf-8")
+            body = json.loads(decoded)
+    except Exception:
+        logger.exception("payload parse failed")
+        raise
+
+    # === 処理ロック（同じ job の二重実行防止） ===
+    job_id = (body.get("job_id") or body.get("jobId") or "").strip()
+    if not job_id:
+        logger.warning("job_id が無いためロック不能 → 通常処理（推奨は job_id 必須）")
+        bc = None
+    else:
+        conn = os.environ["AzureWebJobsStorage"]
+        container = os.environ.get("SENTFLAGS_CONTAINER", "sentflags-function-test")
+        bsc = BlobServiceClient.from_connection_string(conn)
+        cc = bsc.get_container_client(container)
+        bc = cc.get_blob_client(f"{job_id}.lock")
+        try:
+            bc.upload_blob(
+                b"lock",
+                overwrite=False,
+                if_none_match="*",
+                metadata={"status": "processing", "firstUtc": datetime.datetime.utcnow().isoformat() + "Z"}
+            )
+            logger.info(f"[LOCK ACQUIRED] job_id={job_id}")
+        except (ResourceExistsError, ResourceModifiedError):
+            logger.warning(f"[SKIP: DUPLICATE EXECUTION] job_id={job_id}")
+            return
 
     # ffmpeg/ffprobe を起動時に毎回保証（コールドスタート・スケールアウト耐性）
     try:
         FFMPEG_BIN, FFPROBE_BIN = resolve_ffmpeg_and_ffprobe()
     except Exception:
         logger.exception("▶▶ FFMPEG/FFPROBE resolution failed")
+        # ロック取得済みなら status=error で刻む（任意）
+        if bc is not None:
+            try:
+                bc.set_blob_metadata({"status": "error_ffmpeg", "at": datetime.datetime.utcnow().isoformat() + "Z"})
+            except Exception:
+                pass
         raise
 
-    raw = msg.get_body().decode("utf-8", errors="replace")
-    logger.info("▶▶ RAW payload: %s", raw)
+    # ★ 遅延 import：ffmpeg 環境が整った後にロード
+    from kowake import transcribe_and_correct
 
     try:
-        # JSON / Base64 自動判定
-        try:
-            body = json.loads(raw)
-        except json.JSONDecodeError:
-            decoded = base64.b64decode(raw).decode("utf-8")
-            body = json.loads(decoded)
-
-        job_id            = body["job_id"]
         blob_url          = body["blob_url"]
         template_blob_url = body["template_blob_url"]
         logger.info(f"Received job {job_id}, blob: {blob_url}, template: {template_blob_url}")
@@ -182,19 +217,11 @@ async def main(msg: func.QueueMessage) -> None:
         download_blob(blob_url, local_audio)
         logger.info(f"▶▶ STEP1-2: Audio downloaded to {local_audio}")
 
-        # 2. Fast-Start（実体パスを明示）
+        # 2. Fast-Start
         fixed_audio = os.path.join(TMP_DIR, f"{uuid.uuid4()}_fixed.mp4")
         subprocess.run(
-            [
-                FFMPEG_BIN,
-                "-y",
-                "-i", local_audio,
-                "-c", "copy",
-                "-movflags", "+faststart",
-                fixed_audio,
-            ],
-            check=True,
-            timeout=60,
+            [FFMPEG_BIN, "-y", "-i", local_audio, "-c", "copy", "-movflags", "+faststart", fixed_audio],
+            check=True, timeout=60,
         )
         logger.info(f"▶▶ STEP2: Faststart applied: {fixed_audio}")
 
@@ -221,7 +248,16 @@ async def main(msg: func.QueueMessage) -> None:
             upload_to_blob(blob_docx, fp, add_audio_prefix=False)
         logger.info(f"Job {job_id} completed, saved to {blob_docx}")
 
+        # === 正常終了 → 完了フラグ ===
+        if bc is not None:
+            try:
+                bc.set_blob_metadata({"status": "done", "doneUtc": datetime.datetime.utcnow().isoformat() + "Z"})
+                logger.info(f"[LOCK DONE] job_id={job_id}")
+            except Exception:
+                pass
+
     except Exception:
+        # 失敗時：ロックは status=processing のまま（設計どおり）
         logger.exception("Error processing job")
         raise
 

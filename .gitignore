@@ -38,3 +38,10 @@ ProcessAudioFunction/local.settings.json
 build_artifact/
 ai.json
 gijiro_webapp_backup.json
+# local only / secrets / temp
+prod_appsettings*.json
+test_list.json
+prod_list.json
+env-settings.json
+empty.txt
+app.zip
