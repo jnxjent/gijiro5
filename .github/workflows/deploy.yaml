@@ -31,7 +31,7 @@ jobs:
           package: build.zip
           clean: true
 
-  functionapp:
+  functionapp:                # ← ← ← jobs の直下に並列で定義（重要）
     needs: webapp
     runs-on: ubuntu-latest
     steps:
@@ -42,11 +42,17 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # host.json を含む最小ZIPを作成（これ大事）
+      # host.json を必ず含む ZIP を作成
       - name: Build function artifact (zip with host.json)
+        shell: bash
         run: |
+          set -eux
+          ls -la
+          test -f host.json || { echo "::error::host.json がありません"; exit 1; }
+          test -d ProcessAudioFunction || { echo "::error::ProcessAudioFunction/ がありません"; exit 1; }
           zip -r function.zip host.json requirements.txt ProcessAudioFunction/ \
-            -x "*/__pycache__/*" "*.log"
+            -x "*/__pycache__/*" "*.log" || true
+          ls -lh function.zip
 
       - name: Deploy Function (config-zip)
         run: |
@@ -54,4 +60,6 @@ jobs:
             -g ai2 \
             -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }} \
             --src function.zip
-          az functionapp restart -g ai2 -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }}
+
+      - name: Restart Function App
+        run: az functionapp restart -g ai2 -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }}
