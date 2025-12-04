@@ -2,7 +2,8 @@ name: Deploy Gijiro3 (Web & Function)
 
 on:
   push:
-    branches: [ flex-test ]
+    branches:
+      - master   # ★ここを flex-test → master に変更
 
 jobs:
   webapp:
@@ -15,7 +16,6 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # Web用ZIP（Functionは除外）
       - name: Build web artifact (zip)
         shell: bash
         run: |
@@ -45,7 +45,6 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # host.json を必ず含む ZIP を作成
       - name: Build function artifact (zip with host.json)
         shell: bash
         run: |
@@ -62,7 +61,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          az functionapp deployment source config-zip -g ai2 -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --src function.zip
+          az functionapp deployment source config-zip \
+            -g ai2 \
+            -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }} \
+            --src function.zip
 
       - name: Restart Function App
         shell: bash
