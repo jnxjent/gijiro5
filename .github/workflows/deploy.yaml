@@ -34,8 +34,8 @@ jobs:
       - name: Deploy to Azure Web App (TEST)
         uses: azure/webapps-deploy@v3
         with:
-          app-name: ${{ secrets.AZURE_WEBAPP_NAME_TEST }}   # ★ 本番YAMLと同じTEST用シークレット
-          package: .                                       # ★ リポジトリルートをそのままデプロイ
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}   # ★ ここを _TEST ではなく既存の名前に
+          package: .
 
   # ───────────────────────────────────────────────────────────
   # 2) Deploy Function App (TEST)
@@ -67,5 +67,5 @@ jobs:
       - name: Deploy to Azure Function (TEST)
         uses: azure/functions-action@v1
         with:
-          app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME_TEST }}  # ★ 本番YAMLと同じTEST用シークレット
-          package: ProcessAudioFunction                         # ★ ProcessAudioFunction配下を関数アプリとしてデプロイ
+          app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME }}   # ★ ここも _TEST ではなく既存の名前に
+          package: ProcessAudioFunction
