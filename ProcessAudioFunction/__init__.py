@@ -1,5 +1,6 @@
 # ProcessAudioFunction/__init__.py
 import os
+import re
 import json
 import base64
 import tempfile
@@ -32,6 +33,15 @@ TMP_DIR = tempfile.gettempdir()
 TMP_FFMPEG = os.path.join(TMP_DIR, "ffmpeg")
 TMP_FFPROBE = os.path.join(TMP_DIR, "ffprobe")
 
+
+def _account_name_from_cs(cs: str) -> str:
+    try:
+        m = re.search(r"AccountName=([^;]+)", cs or "")
+        return m.group(1) if m else "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+
 # ─────────────────────────────────────────────────────────
 # ffmpeg/ffprobe 解決（/tmp フォールバック）
 #   - import 時に例外は投げない
@@ -43,6 +53,7 @@ def _is_file(path: str) -> bool:
     except Exception:
         return False
 
+
 def _exec_succeeds(bin_path: str) -> bool:
     try:
         subprocess.check_output([bin_path, "-version"], stderr=subprocess.STDOUT, timeout=5)
@@ -50,11 +61,13 @@ def _exec_succeeds(bin_path: str) -> bool:
     except Exception:
         return False
 
+
 def _same_size(a: str, b: str) -> bool:
     try:
         return os.path.getsize(a) == os.path.getsize(b)
     except Exception:
         return False
+
 
 def _ensure_tmp(src: str, dst: str) -> str:
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -65,11 +78,13 @@ def _ensure_tmp(src: str, dst: str) -> str:
         os.replace(tmp_dst, dst)
     return dst
 
+
 def _pick_first_existing(paths: List[str]) -> str:
     for p in paths:
         if _is_file(p):
             return p
     return ""
+
 
 def _candidate_paths_from_env():
     env_ff = os.environ.get("FFMPEG_BINARY") or os.environ.get("FFMPEG_PATH") or ""
@@ -93,6 +108,7 @@ def _candidate_paths_from_env():
     ffmpeg_candidates = [p for p in dict.fromkeys(ffmpeg_candidates) if p]
     ffprobe_candidates = [p for p in dict.fromkeys(ffprobe_candidates) if p]
     return ffmpeg_candidates, ffprobe_candidates
+
 
 def resolve_ffmpeg_and_ffprobe():
     ff_candidates, fp_candidates = _candidate_paths_from_env()
@@ -136,7 +152,11 @@ def resolve_ffmpeg_and_ffprobe():
 
     # 版表示（デバッグ）
     try:
-        out = subprocess.check_output([ff_bin, "-version"], stderr=subprocess.STDOUT, timeout=5).decode("utf-8", "ignore").splitlines()[0]
+        out = (
+            subprocess.check_output([ff_bin, "-version"], stderr=subprocess.STDOUT, timeout=5)
+            .decode("utf-8", "ignore")
+            .splitlines()[0]
+        )
         logger.info(f"[ffmpeg-check] ffmpeg -version: {out}")
     except Exception:
         logger.warning("[ffmpeg-check] could not print ffmpeg version")
@@ -145,13 +165,29 @@ def resolve_ffmpeg_and_ffprobe():
     logger.info(f"▶▶ Using FFPROBE: {fp_bin}")
     return ff_bin, fp_bin
 
+
 logger.info("▶▶ Module import success (ffmpeg resolution will run at invocation)")
+
 
 # ─── Function 本体 ────────────────────────────────────────
 # ※ Azure Functions の Queue Trigger は sync 推奨ですが、
 #   既存実装に合わせて async を維持します。
 async def main(msg: func.QueueMessage) -> None:
     logger.info("▶▶ Function invoked")
+
+    # ===== BOOT / STORAGE TARGET CHECK =====
+    cs = os.environ.get("AzureWebJobsStorage", "")
+    logger.warning(f"[BOOT] AzureWebJobsStorage.AccountName={_account_name_from_cs(cs)}")
+    logger.warning(f"[BOOT] FUNCTIONS_WORKER_RUNTIME={os.environ.get('FUNCTIONS_WORKER_RUNTIME')}")
+    logger.warning(f"[BOOT] WEBSITE_SITE_NAME={os.environ.get('WEBSITE_SITE_NAME')}")
+    logger.warning(f"[BOOT] msg.id={getattr(msg, 'id', None)} dequeue={getattr(msg, 'dequeue_count', None)}")
+    try:
+        b = msg.get_body()
+        logger.warning(f"[BOOT] msg.get_body type={type(b)} len={len(b) if b else 0}")
+        if b:
+            logger.warning(f"[BOOT] msg.get_body head(200)={b[:200]!r}")
+    except Exception:
+        logger.exception("[BOOT] failed to read msg.get_body()")
 
     raw = msg.get_body().decode("utf-8", errors="replace")
     logger.info("▶▶ RAW payload: %s", raw)
@@ -183,7 +219,7 @@ async def main(msg: func.QueueMessage) -> None:
                 b"lock",
                 overwrite=False,
                 if_none_match="*",
-                metadata={"status": "processing", "firstUtc": datetime.datetime.utcnow().isoformat() + "Z"}
+                metadata={"status": "processing", "firstUtc": datetime.datetime.utcnow().isoformat() + "Z"},
             )
             logger.info(f"[LOCK ACQUIRED] job_id={job_id}")
         except (ResourceExistsError, ResourceModifiedError):
@@ -207,7 +243,7 @@ async def main(msg: func.QueueMessage) -> None:
     from kowake import transcribe_and_correct
 
     try:
-        blob_url          = body["blob_url"]
+        blob_url = body["blob_url"]
         template_blob_url = body["template_blob_url"]
         logger.info(f"Received job {job_id}, blob: {blob_url}, template: {template_blob_url}")
 
@@ -221,7 +257,8 @@ async def main(msg: func.QueueMessage) -> None:
         fixed_audio = os.path.join(TMP_DIR, f"{uuid.uuid4()}_fixed.mp4")
         subprocess.run(
             [FFMPEG_BIN, "-y", "-i", local_audio, "-c", "copy", "-movflags", "+faststart", fixed_audio],
-            check=True, timeout=60,
+            check=True,
+            timeout=60,
         )
         logger.info(f"▶▶ STEP2: Faststart applied: {fixed_audio}")
 
@@ -240,7 +277,7 @@ async def main(msg: func.QueueMessage) -> None:
         logger.info("▶▶ STEP5-1: Starting document processing")
         meeting_info = await extract_meeting_info_and_speakers(transcript, template_path)
         local_docx = os.path.join(TMP_DIR, f"{job_id}.docx")
-        blob_docx  = f"processed/{job_id}.docx"
+        blob_docx = f"processed/{job_id}.docx"
         process_document(template_path, local_docx, meeting_info)
         logger.info("▶▶ STEP5-2: Document processed")
 
