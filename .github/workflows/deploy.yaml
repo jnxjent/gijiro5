@@ -69,3 +69,5 @@ jobs:
         with:
           app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME }}   # ★ ここも _TEST ではなく既存の名前に
           package: ProcessAudioFunction
+          scm-do-build-during-deployment: true    # ← 追加
+          enable-oryx-build: true  
