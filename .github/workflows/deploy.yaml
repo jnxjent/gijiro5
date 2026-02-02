@@ -57,10 +57,41 @@ jobs:
         with:
           python-version: '3.12'
 
-      
+      # ★ 切り札：ZIPを手動で作り、内容を固定する（FlexのPublishContent対策）
+      - name: Build function.zip (minimal)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "== repo root =="
+          pwd
+          ls -la
+
+          rm -f function.zip
+
+          echo "== ProcessAudioFunction dir listing (before) =="
+          ls -la ProcessAudioFunction || true
+
+          cd ProcessAudioFunction
+
+          # 混入するとPublishContentで落ちやすいものを除去
+          rm -rf .python_packages __pycache__ .venv .pytest_cache
+          rm -f local.settings.json
+          find . -name "*.pyc" -delete
+
+          echo "== ProcessAudioFunction dir listing (after cleanup) =="
+          ls -la
+
+          # ZIP作成（ZIP直下に host.json が来るように）
+          zip -r ../function.zip .
+
+          cd ..
+
+          echo "== function.zip contents (top) =="
+          unzip -l function.zip | head -n 120
 
       - name: Deploy to Azure Function (TEST)
-        uses: azure/functions-action@v1
+        uses: azure/functions-action@v1.5.2
         with:
           app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME_TEST }}
-          package: ProcessAudioFunction
+          package: function.zip
