@@ -57,12 +57,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install function requirements
-        working-directory: ProcessAudioFunction
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          pip install -r requirements.txt
+      
 
       - name: Deploy to Azure Function (TEST)
         uses: azure/functions-action@v1
