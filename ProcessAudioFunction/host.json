@@ -4,22 +4,5 @@
   "extensionBundle": {
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
     "version": "[4.*, 5.0.0)"
-  },
-
-  // ★★★ Flex Consumption で必須のデプロイ設定 ★★★
-  "functionAppConfig": {
-    "deployment": {
-      "storage": {
-        "type": "blobContainer",
-        "containerName": "functionapp",  
-        // ※ containerName は任意。存在しない場合は自動作成されます。
-
-        "authentication": {
-          "type": "connectionString",
-          "name": "DEPLOYMENT_STORAGE_CONNECTION_STRING"
-          // ※ この AppSetting 名と Azure Portal のアプリ設定を一致させる！
-        }
-      }
-    }
   }
 }
