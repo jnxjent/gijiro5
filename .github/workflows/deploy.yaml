@@ -3,7 +3,7 @@ name: Deploy Gijiro3 TEST (Web & Function)
 on:
   push:
     branches:
-      - flex-test   # ★ flex-testブランチで動かす
+      - flex-test
 
 jobs:
   # ───────────────────────────────────────────────────────────
@@ -13,15 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Azure Login (SP)
-        uses: azure/login@v2
+      - name: Azure Login
+        uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.12'
 
@@ -32,7 +32,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Deploy to Azure Web App (TEST)
-        uses: azure/webapps-deploy@v3
+        uses: azure/webapps-deploy@v2
         with:
           app-name: ${{ secrets.AZURE_WEBAPP_NAME_TEST }}
           package: .
@@ -45,53 +45,27 @@ jobs:
     needs: webapp-test
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Azure Login (SP)
-        uses: azure/login@v2
+      - name: Azure Login
+        uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.12'
 
-      # ★ 切り札：ZIPを手動で作り、内容を固定する（FlexのPublishContent対策）
-      - name: Build function.zip (minimal)
-        shell: bash
+      - name: Install function requirements
+        working-directory: ProcessAudioFunction
         run: |
-          set -euo pipefail
-
-          echo "== repo root =="
-          pwd
-          ls -la
-
-          rm -f function.zip
-
-          echo "== ProcessAudioFunction dir listing (before) =="
-          ls -la ProcessAudioFunction || true
-
-          cd ProcessAudioFunction
-
-          # 混入するとPublishContentで落ちやすいものを除去
-          rm -rf .python_packages __pycache__ .venv .pytest_cache
-          rm -f local.settings.json
-          find . -name "*.pyc" -delete
-
-          echo "== ProcessAudioFunction dir listing (after cleanup) =="
-          ls -la
-
-          # ZIP作成（ZIP直下に host.json が来るように）
-          zip -r ../function.zip .
-
-          cd ..
-
-          echo "== function.zip contents (top) =="
-          unzip -l function.zip | head -n 120
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
 
       - name: Deploy to Azure Function (TEST)
-        uses: azure/functions-action@v1.5.2
+        uses: azure/functions-action@v1
         with:
           app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME_TEST }}
-          package: function.zip
+          package: ProcessAudioFunction
