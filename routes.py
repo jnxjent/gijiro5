@@ -1,5 +1,5 @@
 # routes.py
-from flask import request, render_template, jsonify, redirect, send_file
+from flask import request, render_template, jsonify, redirect, send_file, abort
 import logging
 import os
 import time
@@ -20,13 +20,51 @@ from kowake import (
 
 # ★ 追加：.env の容量制限を index に渡すため
 from config import MAX_CONTENT_LENGTH_BYTES
+import ipaddress
 
+# 環境変数から許可IPリストを取得（カンマ区切り、CIDR対応）
+ALLOWED_DOWNLOAD_IPS = [
+    ip.strip()
+    for ip in os.getenv("ALLOWED_DOWNLOAD_IPS", "").split(",")
+    if ip.strip()
+]
+
+def ip_allowed(client_ip: str, allowed_list: list[str]) -> bool:
+    """単一IP・複数IP・CIDR すべて対応"""
+    try:
+        ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+
+    for allowed in allowed_list:
+        try:
+            if ip in ipaddress.ip_network(allowed, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 def setup_routes(app):
     logger = logging.getLogger("routes")
     logging.basicConfig(level=logging.INFO)
     logger.info("✔ setup_routes() 開始")
+    @app.before_request
+    def restrict_download_by_ip():
+        if request.path.startswith("/api/process/") and request.path.endswith("/download"):
+            # 開発環境では未設定＝制限なし
+            if not ALLOWED_DOWNLOAD_IPS:
+                return
 
+            # Azure App Service経由のクライアントIP取得
+            forwarded_for = request.headers.get("X-Forwarded-For")
+            client_ip = (
+                forwarded_for.split(",")[0].strip()
+                if forwarded_for
+                else request.remote_addr
+            )
+
+            if not ip_allowed(client_ip, ALLOWED_DOWNLOAD_IPS):
+                abort(403, "社外からのダウンロードは許可されていません")
     # キーワードDBの初期ロード
     load_keywords_from_file()
 
@@ -247,6 +285,18 @@ def setup_routes(app):
             path=request.path,
             now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ), 413
+    
+    @app.errorhandler(403)
+    def _h_403(e):
+        logger.error(f"403 Forbidden: {request.path}")
+        return render_template(
+            "error.html",
+            title="403 Forbidden",
+            code=403,
+            message="社外からのダウンロードは許可されていません",
+            path=request.path,
+            now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ), 403
 
     @app.errorhandler(500)
     def _h_500(e):
