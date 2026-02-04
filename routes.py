@@ -259,4 +259,33 @@ def setup_routes(app):
             path=request.path,
             now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ), 500
+    
+    # ─── プロキシダウンロード（Blob URL を隠す）─────────────
+    @app.route("/api/process/<job_id>/download", methods=["GET"])
+    def api_download(job_id):
+        """WEB中継方式: Blobから取得してそのままストリーム返却"""
+        result_blob = f"processed/{job_id}.docx"
+        try:
+            blob_client = BlobClient.from_connection_string(
+                os.getenv("AZURE_STORAGE_CONNECTION_STRING"),
+                os.getenv("AZURE_STORAGE_CONTAINER_NAME"),
+                result_blob
+            )
+            if not blob_client.exists():
+                return jsonify({"error": "ファイルが見つかりません"}), 404
+
+            # ストリームで返却（メモリ効率良い）
+            download_stream = blob_client.download_blob()
+            
+            from flask import Response
+            return Response(
+                download_stream.chunks(),
+                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": f"attachment; filename=gijiroku_{job_id}.docx"
+                }
+            )
+        except Exception as e:
+            logger.error(f"ダウンロード中にエラー: {e}")
+            return jsonify({"error": str(e)}), 500
 
