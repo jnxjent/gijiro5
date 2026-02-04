@@ -55,13 +55,20 @@ def setup_routes(app):
             if not ALLOWED_DOWNLOAD_IPS:
                 return
 
-            # Azure App Service経由のクライアントIP取得
+            # Azure App Service対応：ヘッダー優先でクライアントIP取得
             forwarded_for = request.headers.get("X-Forwarded-For")
-            client_ip = (
-                forwarded_for.split(",")[0].strip()
-                if forwarded_for
-                else request.remote_addr
-            )
+            appservice_ip = request.headers.get("X-AppService-Client-IP")
+
+            client_ip = None
+            if appservice_ip:
+                client_ip = appservice_ip.strip()
+            elif forwarded_for:
+                client_ip = forwarded_for.split(",")[0].strip()
+            else:
+                client_ip = request.remote_addr
+
+            # デバッグログ（確認後に削除）
+            logger.warning(f"[IP DEBUG] client_ip={client_ip}, XFF={forwarded_for}, AppServiceIP={appservice_ip}")
 
             if not ip_allowed(client_ip, ALLOWED_DOWNLOAD_IPS):
                 abort(403, "社外からのダウンロードは許可されていません")
