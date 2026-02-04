@@ -48,18 +48,16 @@ def setup_routes(app):
     logger = logging.getLogger("routes")
     logging.basicConfig(level=logging.INFO)
     logger.info("✔ setup_routes() 開始")
+
     @app.before_request
     def restrict_download_by_ip():
         if request.path.startswith("/api/process/") and request.path.endswith("/download"):
-            # 開発環境では未設定＝制限なし
             if not ALLOWED_DOWNLOAD_IPS:
                 return
 
-            # Azure App Service対応：ヘッダー優先でクライアントIP取得
             forwarded_for = request.headers.get("X-Forwarded-For")
             appservice_ip = request.headers.get("X-AppService-Client-IP")
 
-            client_ip = None
             if appservice_ip:
                 client_ip = appservice_ip.strip()
             elif forwarded_for:
@@ -67,11 +65,17 @@ def setup_routes(app):
             else:
                 client_ip = request.remote_addr
 
-            # デバッグログ（確認後に削除）
-            logger.warning(f"[IP DEBUG] client_ip={client_ip}, XFF={forwarded_for}, AppServiceIP={appservice_ip}")
+            # ポート番号除去（IPv4:PORT のみ）
+            if client_ip and "." in client_ip and client_ip.count(":") == 1:
+                client_ip = client_ip.rsplit(":", 1)[0]
+
+            logger.warning(
+                f"[IP DEBUG] client_ip={client_ip}, XFF={forwarded_for}, AppServiceIP={appservice_ip}"
+            )
 
             if not ip_allowed(client_ip, ALLOWED_DOWNLOAD_IPS):
                 abort(403, "社外からのダウンロードは許可されていません")
+
     # キーワードDBの初期ロード
     load_keywords_from_file()
 
@@ -195,7 +199,7 @@ def setup_routes(app):
 
         return jsonify({"error": "処理が完了しませんでした"}), 504
 
-    # ─── キーワード管理（元のまま） ─────────────────
+    
   # ─── キーワード管理 ────────────────────────
     @app.route("/keywords", methods=["GET"])
     def keywords_page():
