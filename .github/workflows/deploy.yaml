@@ -2,68 +2,81 @@ name: Deploy Gijiro3 (Web & Function)
 
 on:
   push:
-    branches: [ flex-test ]
+    branches:
+      - master
 
 jobs:
+  # ─────────────────────────────────────────────
+  # 1) Deploy Web App (Production)
+  # ─────────────────────────────────────────────
   webapp:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Azure Login (SP)
-        uses: azure/login@v2
+      - name: Azure Login
+        uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # Web用ZIP（Functionは除外）
-      - name: Build web artifact (zip)
-        shell: bash
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
         run: |
-          set -euxo pipefail
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
+
+      # Web 用 ZIP を作成（Function は除外）
+      - name: Build web artifact (zip)
+        run: |
           zip -r build.zip . \
             -x "ProcessAudioFunction/**" \
                ".git/**" ".github/**" ".venv/**" \
                "*/__pycache__/**" "*.log" "*.tar" "*.tar.gz" "*.zip" \
                "GIJIRO BACKUP/**" "GIJIRO_BACKUP/**" "backup/**" "BACKUP/**"
-          ls -lh build.zip
 
-      - name: Deploy to Azure Web App (ZipDeploy)
+      - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
           package: build.zip
           clean: true
 
+  # ─────────────────────────────────────────────
+  # 2) Deploy Function App (Production)
+  # ─────────────────────────────────────────────
   functionapp:
-    needs: webapp
     runs-on: ubuntu-latest
+    needs: webapp
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Azure Login (SP)
-        uses: azure/login@v2
+      - name: Azure Login
+        uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # host.json を必ず含む ZIP を作成
-      - name: Build function artifact (zip with host.json)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          ls -la
-          test -f host.json || { echo "::error::host.json がありません"; exit 1; }
-          test -d ProcessAudioFunction || { echo "::error::ProcessAudioFunction/ がありません"; exit 1; }
-          zip -r function.zip host.json requirements.txt ProcessAudioFunction/ \
-            -x "*/__pycache__/*" "*.log" || true
-          test -s function.zip || { echo "::error::function.zip が見つからない/サイズ0"; exit 1; }
-          ls -lh function.zip
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
 
-      - name: Deploy Function (config-zip)
-        shell: bash
+      - name: Install function requirements
+        working-directory: ProcessAudioFunction
         run: |
-          set -euxo pipefail
-          az functionapp deployment source config-zip -g ai2 -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }} --src function.zip
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
 
-      - name: Restart Function App
-        shell: bash
-        run: az functionapp restart -g ai2 -n ${{ secrets.AZURE_FUNCTIONAPP_NAME }}
+      - name: Deploy to Azure Function
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME }}
+          package: ProcessAudioFunction
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
