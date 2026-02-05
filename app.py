@@ -60,7 +60,10 @@ try:
 except Exception:
     # ログ初期化は任意。失敗しても続行する。
     logging.basicConfig(level=logging.INFO)
-
+print("=== 環境変数チェック ===")
+print(f"AZURE_STORAGE_ACCOUNT_NAME: {os.getenv('AZURE_STORAGE_ACCOUNT_NAME')}")
+print(f"BACKEND_BASE: {os.getenv('BACKEND_BASE')}")
+print(f"AZURE_STORAGE_CONNECTION_STRING: {os.getenv('AZURE_STORAGE_CONNECTION_STRING', '')[:50]}...")
 # ---- 起動時に URL マップをログへ出力（エンドポイント名ズレ検知用） ----
 def _log_url_map(flask_app: Flask) -> None:
     try:

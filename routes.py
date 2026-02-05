@@ -1,5 +1,5 @@
 # routes.py
-from flask import request, render_template, jsonify, redirect, send_file
+from flask import request, render_template, jsonify, redirect, send_file, abort
 import logging
 import os
 import time
@@ -20,12 +20,61 @@ from kowake import (
 
 # ★ 追加：.env の容量制限を index に渡すため
 from config import MAX_CONTENT_LENGTH_BYTES
+import ipaddress
 
+# 環境変数から許可IPリストを取得（カンマ区切り、CIDR対応）
+ALLOWED_DOWNLOAD_IPS = [
+    ip.strip()
+    for ip in os.getenv("ALLOWED_DOWNLOAD_IPS", "").split(",")
+    if ip.strip()
+]
+
+def ip_allowed(client_ip: str, allowed_list: list[str]) -> bool:
+    """単一IP・複数IP・CIDR すべて対応"""
+    try:
+        ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+
+    for allowed in allowed_list:
+        try:
+            if ip in ipaddress.ip_network(allowed, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 def setup_routes(app):
     logger = logging.getLogger("routes")
     logging.basicConfig(level=logging.INFO)
     logger.info("✔ setup_routes() 開始")
+
+    @app.before_request
+    def restrict_download_by_ip():
+        if request.path.startswith("/api/process/") and request.path.endswith("/download"):
+            if not ALLOWED_DOWNLOAD_IPS:
+                return
+
+            forwarded_for = request.headers.get("X-Forwarded-For")
+            appservice_ip = request.headers.get("X-AppService-Client-IP")
+
+            if appservice_ip:
+                client_ip = appservice_ip.strip()
+            elif forwarded_for:
+                client_ip = forwarded_for.split(",")[0].strip()
+            else:
+                client_ip = request.remote_addr
+
+            # ポート番号除去（IPv4:PORT のみ）
+            if client_ip and "." in client_ip and client_ip.count(":") == 1:
+                client_ip = client_ip.rsplit(":", 1)[0]
+
+            logger.warning(
+                f"[IP DEBUG] client_ip={client_ip}, XFF={forwarded_for}, AppServiceIP={appservice_ip}"
+            )
+
+            if not ip_allowed(client_ip, ALLOWED_DOWNLOAD_IPS):
+                abort(403, "社外からのダウンロードは許可されていません")
 
     # キーワードDBの初期ロード
     load_keywords_from_file()
@@ -150,7 +199,7 @@ def setup_routes(app):
 
         return jsonify({"error": "処理が完了しませんでした"}), 504
 
-    # ─── キーワード管理（元のまま） ─────────────────
+    
   # ─── キーワード管理 ────────────────────────
     @app.route("/keywords", methods=["GET"])
     def keywords_page():
@@ -247,6 +296,18 @@ def setup_routes(app):
             path=request.path,
             now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ), 413
+    
+    @app.errorhandler(403)
+    def _h_403(e):
+        logger.error(f"403 Forbidden: {request.path}")
+        return render_template(
+            "error.html",
+            title="403 Forbidden",
+            code=403,
+            message="社外からのダウンロードは許可されていません",
+            path=request.path,
+            now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ), 403
 
     @app.errorhandler(500)
     def _h_500(e):
@@ -259,4 +320,33 @@ def setup_routes(app):
             path=request.path,
             now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ), 500
+    
+    # ─── プロキシダウンロード（Blob URL を隠す）─────────────
+    @app.route("/api/process/<job_id>/download", methods=["GET"])
+    def api_download(job_id):
+        """WEB中継方式: Blobから取得してそのままストリーム返却"""
+        result_blob = f"processed/{job_id}.docx"
+        try:
+            blob_client = BlobClient.from_connection_string(
+                os.getenv("AZURE_STORAGE_CONNECTION_STRING"),
+                os.getenv("AZURE_STORAGE_CONTAINER_NAME"),
+                result_blob
+            )
+            if not blob_client.exists():
+                return jsonify({"error": "ファイルが見つかりません"}), 404
+
+            # ストリームで返却（メモリ効率良い）
+            download_stream = blob_client.download_blob()
+            
+            from flask import Response
+            return Response(
+                download_stream.chunks(),
+                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                headers={
+                    "Content-Disposition": f"attachment; filename=gijiroku_{job_id}.docx"
+                }
+            )
+        except Exception as e:
+            logger.error(f"ダウンロード中にエラー: {e}")
+            return jsonify({"error": str(e)}), 500
 
