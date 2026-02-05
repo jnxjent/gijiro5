@@ -1,4 +1,4 @@
-name: Deploy Gijiro3 TEST (Web & Function)
+name: Deploy Gijiro3 (Web & Function)
 
 on:
   push:
@@ -6,14 +6,14 @@ on:
       - flex-test
 
 jobs:
-  # ───────────────────────────────────────────────────────────
-  # 1) Deploy Web App (TEST)
-  # ───────────────────────────────────────────────────────────
-  webapp-test:
+  # ─────────────────────────────────────────────
+  # 1) Deploy Web App (Production)
+  # ─────────────────────────────────────────────
+  webapp:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
@@ -23,7 +23,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
@@ -31,21 +31,31 @@ jobs:
           source .venv/bin/activate
           pip install -r requirements.txt
 
-      - name: Deploy to Azure Web App (TEST)
-        uses: azure/webapps-deploy@v2
-        with:
-          app-name: ${{ secrets.AZURE_WEBAPP_NAME_TEST }}
-          package: .
+      # Web 用 ZIP を作成（Function は除外）
+      - name: Build web artifact (zip)
+        run: |
+          zip -r build.zip . \
+            -x "ProcessAudioFunction/**" \
+               ".git/**" ".github/**" ".venv/**" \
+               "*/__pycache__/**" "*.log" "*.tar" "*.tar.gz" "*.zip" \
+               "GIJIRO BACKUP/**" "GIJIRO_BACKUP/**" "backup/**" "BACKUP/**"
 
-  # ───────────────────────────────────────────────────────────
-  # 2) Deploy Function App (TEST)
-  # ───────────────────────────────────────────────────────────
-  functionapp-test:
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          package: build.zip
+          clean: true
+
+  # ─────────────────────────────────────────────
+  # 2) Deploy Function App (Production)
+  # ─────────────────────────────────────────────
+  functionapp:
     runs-on: ubuntu-latest
-    needs: webapp-test
+    needs: webapp
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Azure Login
         uses: azure/login@v1
@@ -55,7 +65,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install function requirements
         working-directory: ProcessAudioFunction
@@ -64,8 +74,9 @@ jobs:
           source .venv/bin/activate
           pip install -r requirements.txt
 
-      - name: Deploy to Azure Function (TEST)
+      - name: Deploy to Azure Function
         uses: azure/functions-action@v1
         with:
-          app-name: processaudiofunction-gijiro-flex-v2
+          app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME }}
           package: ProcessAudioFunction
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
