@@ -1,3 +1,6 @@
+# kowake.py
+from __future__ import annotations
+
 import os
 import sys
 import platform
@@ -13,11 +16,12 @@ from urllib.parse import urlparse, quote
 
 from dotenv import load_dotenv
 
-# ✅ Deepgram SDK v3
-from deepgram import DeepgramClient
-
 import openai
 from storage import upload_to_blob, download_blob
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ── app/send_guard.py を確実に読み込むためのパス設定 ─────────────────
 BASE_DIR = os.path.dirname(__file__)
@@ -26,6 +30,11 @@ if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
 from send_guard import mark_once, unmark  # ★ 冪等ガード
+
+# ──────────────────────────────────────────────────────────────
+# 0) .env 読み込み（先に読む：Deepgram/OpenAI/ffmpeg等のENVを確実に反映）
+# ──────────────────────────────────────────────────────────────
+load_dotenv()
 
 # ── 1) ffmpeg / ffprobe パス検出 ───────────────────────────────
 ffmpeg_path = os.getenv("FFMPEG_PATH")
@@ -56,7 +65,6 @@ print(f"[INFO] Using ffmpeg:  {ffmpeg_path}")
 print(f"[INFO] Using ffprobe: {ffprobe_path}")
 
 # ── 2) 環境変数読み込み ─────────────────────────────────────────
-load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
 DEPLOYMENT_ID = os.getenv("DEPLOYMENT_ID")
@@ -68,10 +76,36 @@ openai.api_base = OPENAI_API_BASE
 openai.api_type = "azure"
 openai.api_version = "2024-08-01-preview"
 
-# ✅ Deepgram v3 client
-deepgram_client = DeepgramClient(DEEPGRAM_API_KEY)
-
 TMP_DIR = tempfile.gettempdir()
+
+# ──────────────────────────────────────────────────────────────
+# ✅ Deepgram クライアントは遅延生成（import時に落ちて routes を殺さない）
+# ──────────────────────────────────────────────────────────────
+_deepgram_client = None
+
+
+def get_deepgram_client():
+    """
+    Deepgram SDK v3 を遅延 import してクライアントを返す。
+    routes.py 読み込み時（kowake import時）に deepgram が不整合でも落とさない。
+    """
+    global _deepgram_client
+
+    if _deepgram_client is not None:
+        return _deepgram_client
+
+    if not DEEPGRAM_API_KEY:
+        raise RuntimeError("DEEPGRAM_API_KEY is not set")
+
+    try:
+        # ✅ Deepgram SDK v3
+        from deepgram import DeepgramClient  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"Deepgram SDK import failed: {e}")
+
+    _deepgram_client = DeepgramClient(DEEPGRAM_API_KEY)
+    return _deepgram_client
+
 
 # ──────────────────────────────────────────────────────────────
 # 音声 → Deepgram → OpenAI 整形
@@ -87,7 +121,6 @@ async def _transcribe_chunk(job_id: str, idx: int, chunk_path: str) -> str:
     # ★ 冪等：最初の1回だけ通す（重送・重課金を遮断）
     if not mark_once(job_id, idx):
         print(f"[INFO] Skip duplicated send: job={job_id} chunk={idx}", file=sys.stderr, flush=True)
-        # できればここで一時ファイルを消す
         try:
             os.remove(wav_path)
         except Exception:
@@ -99,8 +132,9 @@ async def _transcribe_chunk(job_id: str, idx: int, chunk_path: str) -> str:
         return ""
 
     try:
+        deepgram_client = get_deepgram_client()
+
         # ✅ Deepgram SDK v3: async prerecorded transcribe (file)
-        # モデルなどの指定は v3では options にまとめる
         with open(wav_path, "rb") as f:
             resp = await deepgram_client.listen.asyncprerecorded.v("1").transcribe_file(
                 f,
@@ -109,7 +143,6 @@ async def _transcribe_chunk(job_id: str, idx: int, chunk_path: str) -> str:
                     "detect_language": True,
                     "diarize": True,
                     "utterances": True,
-                    # 必要なら: "smart_format": True,
                 },
             )
     except Exception as e:
@@ -166,25 +199,41 @@ async def transcribe_and_correct(source: str) -> str:
     # 3) 長さ取得 (秒)
     cmd = [
         ffprobe_path,
-        "-v", "error",
-        "-select_streams", "a:0",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
         fixed,
     ]
     duration = float(subprocess.check_output(cmd).strip())
     chunk_len = 10 * 60  # 10分
-    overlap = 1 * 60     # 1分
+    overlap = 1 * 60  # 1分
     step = chunk_len - overlap
 
     # 4) ffmpeg でチャンク分割
-    chunk_paths = []
+    chunk_paths: list[tuple[int, str]] = []
     start = 0.0
     idx = 0
     while start < duration:
         out_path = os.path.join(TMP_DIR, f"{uuid.uuid4()}_seg_{idx}.mp4")
         subprocess.run(
-            [ffmpeg_path, "-y", "-ss", str(start), "-t", str(min(chunk_len, duration - start)), "-i", fixed, "-c", "copy", out_path],
+            [
+                ffmpeg_path,
+                "-y",
+                "-ss",
+                str(start),
+                "-t",
+                str(min(chunk_len, duration - start)),
+                "-i",
+                fixed,
+                "-c",
+                "copy",
+                out_path,
+            ],
             check=True,
         )
         chunk_paths.append((idx, out_path))
@@ -192,13 +241,14 @@ async def transcribe_and_correct(source: str) -> str:
         start += step
 
     # 5) 並列送信 → 整形AI
-    corrected = []
+    corrected: list[str] = []
     for i in range(0, len(chunk_paths), 6):
-        tasks = [_transcribe_chunk(job_id, idx, path) for idx, path in chunk_paths[i: i + 6]]
+        tasks = [_transcribe_chunk(job_id, idx, path) for idx, path in chunk_paths[i : i + 6]]
         results = await asyncio.gather(*tasks)
         for text in results:
             if not text:
                 continue  # duplicated / 空は無視
+
             prompt = (
                 "以下の音声書き起こしを自然な日本語にしてください。\n\n"
                 f"{text}\n\n"
@@ -229,7 +279,7 @@ async def transcribe_and_correct(source: str) -> str:
         pass
 
     # 置換ステップ追加
-    replaced_text, hit = _apply_keyword_replacements(full)
+    replaced_text, _hit = _apply_keyword_replacements(full)
     return replaced_text
 
 
@@ -246,7 +296,9 @@ def _apply_keyword_replacements(text: str) -> tuple[str, int]:
     for kw in _KEYWORDS_DB:
         corr = kw["keyword"]
         tgts = [kw["reading"]] + [
-            e.strip() for e in re.split(r"[,\uFF0C\u3001]", kw.get("wrong_examples", "")) if e.strip()
+            e.strip()
+            for e in re.split(r"[,\uFF0C\u3001]", kw.get("wrong_examples", ""))
+            if e.strip()
         ]
         for t in tgts:
             pat = re.compile(re.escape(t), flags=re.IGNORECASE)
@@ -257,7 +309,6 @@ def _apply_keyword_replacements(text: str) -> tuple[str, int]:
 
 
 # -------------------- CRUD + ログ ---------------------------------
-
 def get_all_keywords():
     return _KEYWORDS_DB
 
@@ -268,12 +319,14 @@ def get_keyword_by_id(id):
 
 def add_keyword(reading, wrong_examples, keyword):
     before = len(_KEYWORDS_DB)
-    _KEYWORDS_DB.append({
-        "id": str(uuid.uuid4()),
-        "reading": reading,
-        "wrong_examples": wrong_examples,
-        "keyword": keyword,
-    })
+    _KEYWORDS_DB.append(
+        {
+            "id": str(uuid.uuid4()),
+            "reading": reading,
+            "wrong_examples": wrong_examples,
+            "keyword": keyword,
+        }
+    )
     after = len(_KEYWORDS_DB)
     print(f"[ADD] keywords {before} → {after}")
     _save_keywords_to_blob()
