@@ -5,7 +5,7 @@ app.py – Flask エントリポイント（最小修正版）
 ・ffmpeg / ffprobe の実行ファイルを OS 別に設定
 ・pydub が参照する環境変数を上書き
 ・CORS, ルーティング, ログ初期化, エラーハンドラ, waitress 起動
-・★追加: GET / と /health を用意して Azure で 404 にならないようにする
+・★トップ(/)は templates/index.html を返す（Azure Portal クリックで普通に表示）
 """
 
 import os
@@ -54,12 +54,10 @@ else:
     app.config.pop("MAX_CONTENT_LENGTH", None)
 
 # ==== 構造化ログの初期化（ログのみ・処理には影響なし） ====
-# ※ utils/logging_setup.py が無い場合はこの import を外してください
 try:
     from utils.logging_setup import init_logging
     init_logging(app)
 except Exception:
-    # ログ初期化は任意。失敗しても続行する。
     logging.basicConfig(level=logging.INFO)
 
 print("=== 環境変数チェック ===")
@@ -78,23 +76,22 @@ def _log_url_map(flask_app: Flask) -> None:
     except Exception:
         pass
 
+
 # =========================================================
-# ★追加: ルート "/" と "/health" を app.py 側で確実に提供
+# ★トップ(/)は templates/index.html を返す
 # =========================================================
 @app.get("/")
 def home():
-    """
-    Azure Portal / Kudu / 外形監視が GET / を叩くことが多いので
-    ここで 200 を返して「起動してるのに 404」に見えるのを防ぐ。
-    """
-    return "gijiro5 is running", 200
+    try:
+        max_bytes = BODY_UPLOAD_MAX_BYTES if USE_BODY_UPLOAD else (BODY_UPLOAD_MAX_BYTES or 0)
+        return render_template("index.html", max_bytes=max_bytes)
+    except Exception as e:
+        app.logger.warning(f"[WARNING] Failed to render index.html: {e}")
+        return "gijiro is running (index.html not found)", 200
 
 
 @app.get("/health")
 def health():
-    """
-    routes 側の /healthz が壊れても最低限の死活確認ができる保険。
-    """
     return jsonify({"ok": True, "app": "gijiro5"}), 200
 
 
@@ -102,13 +99,11 @@ def health():
 try:
     from routes import setup_routes
     app.logger.info("✔ routes.py を読み込みます")
-    setup_routes(app)  # 既存のルーティング初期化（/healthz も含む想定）
+    setup_routes(app)
     app.logger.info("✔ setup_routes 実行完了")
 except Exception as e:
-    # ルーティング読み込み失敗もログに残す（起動は継続）
     app.logger.warning(f"[WARNING] routes.py の読み込みに失敗しました: {e}")
 
-# URL マップを最後にログ出力
 _log_url_map(app)
 
 # ==== エラーハンドラ（404 は 404 のまま、その他は 500） ====
@@ -127,7 +122,6 @@ def handle_404(e):
 
 @app.errorhandler(Exception)
 def handle_500(e):
-    # NotFound を 500 に昇格させない（保険）
     if isinstance(e, NotFound):
         return handle_404(e)
     logging.exception("Unhandled exception:")
@@ -140,6 +134,7 @@ def handle_500(e):
         ), 500
     except (JinjaTemplateNotFound, Exception):
         return "500 Internal Server Error", 500
+
 
 # ==== 起動ログ（情報） ====
 app.logger.info(f"[INFO] FFmpeg:  {FFMPEG_BIN}")
