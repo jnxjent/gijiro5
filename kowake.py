@@ -10,8 +10,12 @@ import json
 import asyncio
 from pathlib import Path
 from urllib.parse import urlparse, quote
+
 from dotenv import load_dotenv
-from deepgram import Deepgram
+
+# ✅ Deepgram SDK v3
+from deepgram import DeepgramClient
+
 import openai
 from storage import upload_to_blob, download_blob
 
@@ -64,7 +68,9 @@ openai.api_base = OPENAI_API_BASE
 openai.api_type = "azure"
 openai.api_version = "2024-08-01-preview"
 
-deepgram_client = Deepgram(DEEPGRAM_API_KEY)
+# ✅ Deepgram v3 client
+deepgram_client = DeepgramClient(DEEPGRAM_API_KEY)
+
 TMP_DIR = tempfile.gettempdir()
 
 # ──────────────────────────────────────────────────────────────
@@ -78,37 +84,57 @@ async def _transcribe_chunk(job_id: str, idx: int, chunk_path: str) -> str:
         check=True,
     )
 
-    with open(wav_path, "rb") as f:
-        buf = f.read()
-
-    # 一時ファイルは極力消す（失敗しても続行）
-    try:
-        os.remove(wav_path)
-    except Exception:
-        pass
-    try:
-        os.remove(chunk_path)
-    except Exception:
-        pass
-
     # ★ 冪等：最初の1回だけ通す（重送・重課金を遮断）
     if not mark_once(job_id, idx):
         print(f"[INFO] Skip duplicated send: job={job_id} chunk={idx}", file=sys.stderr, flush=True)
+        # できればここで一時ファイルを消す
+        try:
+            os.remove(wav_path)
+        except Exception:
+            pass
+        try:
+            os.remove(chunk_path)
+        except Exception:
+            pass
         return ""
 
     try:
-        resp = await deepgram_client.transcription.prerecorded(
-            {"buffer": buf, "mimetype": "audio/wav"},
-            {"model": "nova-2-general", "detect_language": True, "diarize": True, "utterances": True},
-        )
+        # ✅ Deepgram SDK v3: async prerecorded transcribe (file)
+        # モデルなどの指定は v3では options にまとめる
+        with open(wav_path, "rb") as f:
+            resp = await deepgram_client.listen.asyncprerecorded.v("1").transcribe_file(
+                f,
+                options={
+                    "model": "nova-2-general",
+                    "detect_language": True,
+                    "diarize": True,
+                    "utterances": True,
+                    # 必要なら: "smart_format": True,
+                },
+            )
     except Exception as e:
         # 失敗したらフラグ解除（再送を許可）
         unmark(job_id, idx)
         print(f"[ERROR] Deepgram failed: job={job_id} chunk={idx} err={e}", file=sys.stderr, flush=True)
         raise
+    finally:
+        # 一時ファイルは極力消す（失敗しても続行）
+        try:
+            os.remove(wav_path)
+        except Exception:
+            pass
+        try:
+            os.remove(chunk_path)
+        except Exception:
+            pass
 
-    uts = resp.get("results", {}).get("utterances", []) or []
+    # v3は dict 互換で返る想定（環境によりレスポンス型が違う場合があるので保険）
+    if hasattr(resp, "to_dict"):
+        resp = resp.to_dict()
+
+    uts = (resp or {}).get("results", {}).get("utterances", []) or []
     return "\n".join(f"[Speaker {u.get('speaker')}] {u.get('transcript')}" for u in uts)
+
 
 async def transcribe_and_correct(source: str) -> str:
     # 1) URL判定 & ダウンロード
@@ -206,9 +232,11 @@ async def transcribe_and_correct(source: str) -> str:
     replaced_text, hit = _apply_keyword_replacements(full)
     return replaced_text
 
+
 # ─── キーワード管理 / Blob 連携 ────────────────────────────────
 _KEYWORDS_DB: list[dict] = []
 BLOB_JSON_PATH = "settings/keywords.json"
+
 
 def _apply_keyword_replacements(text: str) -> tuple[str, int]:
     """
@@ -227,13 +255,16 @@ def _apply_keyword_replacements(text: str) -> tuple[str, int]:
     print(f"[DEBUG] keyword replace hit = {total_hit}", file=sys.stderr, flush=True)
     return text, total_hit
 
+
 # -------------------- CRUD + ログ ---------------------------------
 
 def get_all_keywords():
     return _KEYWORDS_DB
 
+
 def get_keyword_by_id(id):
     return next((k for k in _KEYWORDS_DB if k["id"] == id), None)
+
 
 def add_keyword(reading, wrong_examples, keyword):
     before = len(_KEYWORDS_DB)
@@ -247,6 +278,7 @@ def add_keyword(reading, wrong_examples, keyword):
     print(f"[ADD] keywords {before} → {after}")
     _save_keywords_to_blob()
 
+
 def delete_keyword_by_id(id):
     global _KEYWORDS_DB
     before = len(_KEYWORDS_DB)
@@ -254,6 +286,7 @@ def delete_keyword_by_id(id):
     after = len(_KEYWORDS_DB)
     print(f"[DEL] keywords {before} → {after}")
     _save_keywords_to_blob()
+
 
 def update_keyword_by_id(id, reading, wrong_examples, keyword):
     for k in _KEYWORDS_DB:
@@ -264,6 +297,7 @@ def update_keyword_by_id(id, reading, wrong_examples, keyword):
             print(f"[UPDATE] keyword id={id} を更新しました")
             break
     _save_keywords_to_blob()
+
 
 def load_keywords_from_file():
     global _KEYWORDS_DB
@@ -287,6 +321,7 @@ def load_keywords_from_file():
     except Exception as e:
         print(f"[WARN] キーワード読込失敗: {e}")
         _KEYWORDS_DB = []
+
 
 def _save_keywords_to_blob():
     try:
