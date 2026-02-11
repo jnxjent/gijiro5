@@ -5,6 +5,7 @@ app.py – Flask エントリポイント（最小修正版）
 ・ffmpeg / ffprobe の実行ファイルを OS 別に設定
 ・pydub が参照する環境変数を上書き
 ・CORS, ルーティング, ログ初期化, エラーハンドラ, waitress 起動
+・★追加: GET / と /health を用意して Azure で 404 にならないようにする
 """
 
 import os
@@ -12,7 +13,7 @@ import platform
 import logging
 from dotenv import load_dotenv
 from pydub import AudioSegment
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 from jinja2 import TemplateNotFound as JinjaTemplateNotFound
 from werkzeug.exceptions import NotFound
@@ -60,10 +61,12 @@ try:
 except Exception:
     # ログ初期化は任意。失敗しても続行する。
     logging.basicConfig(level=logging.INFO)
+
 print("=== 環境変数チェック ===")
 print(f"AZURE_STORAGE_ACCOUNT_NAME: {os.getenv('AZURE_STORAGE_ACCOUNT_NAME')}")
 print(f"BACKEND_BASE: {os.getenv('BACKEND_BASE')}")
 print(f"AZURE_STORAGE_CONNECTION_STRING: {os.getenv('AZURE_STORAGE_CONNECTION_STRING', '')[:50]}...")
+
 # ---- 起動時に URL マップをログへ出力（エンドポイント名ズレ検知用） ----
 def _log_url_map(flask_app: Flask) -> None:
     try:
@@ -74,6 +77,26 @@ def _log_url_map(flask_app: Flask) -> None:
         flask_app.logger.info("=== URL MAP ===\n" + "\n".join(sorted(lines)))
     except Exception:
         pass
+
+# =========================================================
+# ★追加: ルート "/" と "/health" を app.py 側で確実に提供
+# =========================================================
+@app.get("/")
+def home():
+    """
+    Azure Portal / Kudu / 外形監視が GET / を叩くことが多いので
+    ここで 200 を返して「起動してるのに 404」に見えるのを防ぐ。
+    """
+    return "gijiro5 is running", 200
+
+
+@app.get("/health")
+def health():
+    """
+    routes 側の /healthz が壊れても最低限の死活確認ができる保険。
+    """
+    return jsonify({"ok": True, "app": "gijiro5"}), 200
+
 
 # ==== ルーティング登録 ====
 try:
@@ -100,6 +123,7 @@ def handle_404(e):
         ), 404
     except (JinjaTemplateNotFound, Exception):
         return f"404 Not Found: {request.path}", 404
+
 
 @app.errorhandler(Exception)
 def handle_500(e):
